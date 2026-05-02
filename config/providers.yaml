@@ -1,0 +1,59 @@
+# Search provider configuration for Pivot Web Search plugin.
+# Providers are tried in priority order (lower = tried first) during failover.
+# In super mode, all enabled providers are queried in parallel.
+
+providers:
+  - name: ddg
+    type: ddg
+    tier: free
+    enabled: true
+    priority: 10
+
+  - name: tavily
+    type: tavily
+    tier: paid
+    enabled: true
+    priority: 20
+    api_key_env: TAVILY_API_KEY
+
+  - name: brave
+    type: brave
+    tier: paid
+    enabled: true
+    priority: 30
+    api_key_env: BRAVE_API_KEY
+
+  - name: gemini
+    type: gemini
+    tier: daily
+    enabled: true
+    priority: 40
+    api_key_env: GEMINI_SEARCH_API_KEY
+    model: gemini-2.5-flash
+
+  # Example: self-hosted SearXNG instance
+  # - name: searxng-local
+  #   type: searxng
+  #   enabled: true
+  #   priority: 5
+  #   endpoint: "http://localhost:8888/search"
+  #   format: json
+
+  # Example: generic JSON search API (e.g. Serper)
+  # - name: serper
+  #   type: json_api
+  #   enabled: false
+  #   priority: 25
+  #   endpoint: "https://google.serper.dev/search"
+  #   api_key_env: SERPER_API_KEY
+  #   method: POST
+  #   headers:
+  #     Content-Type: application/json
+  #   request_body:
+  #     q: "{{query}}"
+  #     num: "{{max_results}}"
+  #   response_mapping:
+  #     results_path: "organic"
+  #     title: "title"
+  #     url: "link"
+  #     snippet: "snippet"

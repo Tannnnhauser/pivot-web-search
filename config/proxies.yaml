@@ -1,0 +1,28 @@
+# Proxy endpoints for Pivot Web Search plugin.
+# Tried in priority order (lower = tried first).
+# The per-host proxy cache still applies — a proxy that worked for a host
+# will be tried first regardless of priority on subsequent requests.
+
+proxies:
+  - name: direct
+    url: null            # null = no proxy (direct connection)
+    enabled: true
+    priority: 1
+
+  # Example: first proxy endpoint
+  # - name: myproxy1
+  #   url: "http://myproxy1.example:8080"
+  #   enabled: true
+  #   priority: 2
+
+  # Example: second proxy endpoint
+  # - name: myproxy2
+  #   url: "http://myproxy2.example:8080"
+  #   enabled: true
+  #   priority: 3
+
+  # Example: SOCKS5 proxy (requires PySocks: uv pip install pysocks)
+  # - name: ssh-tunnel
+  #   url: "socks5://127.0.0.1:1080"
+  #   enabled: true
+  #   priority: 4

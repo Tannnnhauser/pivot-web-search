@@ -1,0 +1,50 @@
+{
+  "name": "pivot-web-search",
+  "version": "1.0.0",
+  "description": "A resilient, multi-provider web search and content extraction plugin for Claude Code on Amazon Bedrock and other API providers.",
+  "author": { "name": "Tannnnhauser" },
+  "keywords": ["search", "web", "fetch", "extract", "mcp"],
+  "userConfig": {
+    "enabled_providers": {
+      "type": "string",
+      "title": "Search providers",
+      "description": "Comma-separated providers in failover order: ddg, tavily, brave, gemini, searxng. Default: ddg,tavily,brave,gemini",
+      "default": "ddg,tavily,brave,gemini",
+      "required": false
+    },
+    "tavily_api_key": {
+      "type": "string",
+      "title": "Tavily API Key",
+      "description": "Leave empty to skip Tavily",
+      "sensitive": true,
+      "required": false
+    },
+    "brave_api_key": {
+      "type": "string",
+      "title": "Brave Search API Key",
+      "description": "Leave empty to skip Brave",
+      "sensitive": true,
+      "required": false
+    },
+    "gemini_api_key": {
+      "type": "string",
+      "title": "Gemini API Key",
+      "description": "Leave empty to skip Gemini",
+      "sensitive": true,
+      "required": false
+    },
+    "proxy_urls": {
+      "type": "string",
+      "title": "Proxy URLs",
+      "description": "Comma-separated proxy URLs in priority order. Use 'direct' for no proxy. Default: direct",
+      "default": "direct",
+      "required": false
+    },
+    "gemini_daily_quota": {
+      "type": "number",
+      "title": "Gemini daily quota",
+      "description": "Daily grounded search limit (resets at PT midnight). Free tier: 500 RPD. Leave empty for no limit.",
+      "required": false
+    }
+  }
+}

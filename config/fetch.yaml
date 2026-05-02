@@ -1,0 +1,21 @@
+# Content extraction / WebFetch configuration.
+# js_renderer controls fallback when trafilatura returns empty content (SPA/JS pages).
+#
+# Options:
+#   none       — No fallback; use only trafilatura (default)
+#   playwright — Local headless browser rendering (requires: uv sync --extra browser)
+#   tavily     — Remote extraction via Tavily Extract API (requires: TAVILY_API_KEY)
+
+fetch:
+  js_renderer: none
+  max_chars: 100000
+  empty_threshold: 200
+
+  playwright:
+    timeout: 30000           # ms to wait for page load
+    wait_until: networkidle  # load | domcontentloaded | networkidle
+
+  tavily:
+    extract_depth: advanced  # basic | advanced (advanced handles JS/tables/embedded content)
+    format: markdown         # markdown | text
+    timeout: 30              # seconds

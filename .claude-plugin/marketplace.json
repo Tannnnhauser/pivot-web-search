@@ -1,0 +1,20 @@
+{
+  "name": "pivot-web-search-plugin",
+  "owner": {
+    "name": "Tannnnhauser"
+  },
+  "metadata": {
+    "description": "Pivot Web Search — a resilient, multi-provider web search and content extraction plugin for Claude Code on Amazon Bedrock and other API providers.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "pivot-web-search",
+      "description": "A resilient, multi-provider web search and content extraction plugin for Claude Code on Amazon Bedrock and other API providers.",
+      "source": "./",
+      "skills": [
+        "./skills/pivot-web-search"
+      ]
+    }
+  ]
+}
