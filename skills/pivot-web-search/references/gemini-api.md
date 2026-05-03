@@ -6,7 +6,7 @@
 
 ## Model
 
-`gemini-2.5-flash` — best quality for grounding; free tier (1500 req/day shared across all models).
+`gemini-2.5-flash` — best quality for grounding. Free tier RPD varies by account tier (check [AI Studio](https://aistudio.google.com/rate-limit) for current limits).
 
 ## Request Payload
 
@@ -37,4 +37,4 @@
 
 ## Quota
 
-1500 grounded requests/day on free tier, shared across all Gemini models in the project.
+Free tier RPD varies by account and model (Google adjusts these periodically). Check your actual limits at [AI Studio Rate Limits](https://aistudio.google.com/rate-limit). Use `PIVOT_WEB_SEARCH_GEMINI_QUOTA` to set a local daily cap matching your account's limit.

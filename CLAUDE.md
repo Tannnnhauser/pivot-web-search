@@ -41,12 +41,12 @@ Implications:
 
 ```sh
 uv sync --extra dev
-pytest -m "not integration"     # 158+ offline tests (~4s)
+pytest -m "not integration"     # 193 offline tests (~4s)
 pytest                          # all tests including live API integration
 ```
 
 ## Development Rules
 
 - **Always update README** when implementing features, enhancements, or behavioral changes. Documentation must stay in sync with code — treat it as part of the implementation, not a follow-up.
-- **Run tests before committing** — all 158+ offline tests must pass (`pytest -m "not integration"`).
+- **Run tests before committing** — all 193 offline tests must pass (`pytest -m "not integration"`).
 - **Use `log()` from `pivot_web_search_mcp.logging`** for all diagnostic output. Never use `print(..., file=sys.stderr)` directly.

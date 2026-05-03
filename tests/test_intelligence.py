@@ -1,6 +1,6 @@
 """Server intelligence tests — smart defaults, quality detection."""
 
-from pivot_web_search_mcp import quota, server
+from pivot_web_search_mcp import server
 
 
 class TestApplySmartDefaults:
@@ -35,24 +35,24 @@ class TestApplySmartDefaults:
         assert kwargs["timelimit"] == "y"
 
     def test_news_detection(self):
-        kwargs = {"news": False}
+        kwargs = {"news": None}
         server._apply_smart_defaults("news about AI", kwargs)
         assert kwargs["news"] is True
 
-    def test_news_explicit_false_overridden(self):
+    def test_news_explicit_false_respected(self):
         kwargs = {"news": False}
         server._apply_smart_defaults("breaking news AI", kwargs)
-        assert kwargs["news"] is True
+        assert kwargs["news"] is False
 
     def test_released_sets_news(self):
-        kwargs = {"news": False}
+        kwargs = {"news": None}
         server._apply_smart_defaults("Apple released new iPhone", kwargs)
         assert kwargs["news"] is True
 
     def test_no_news_pattern(self):
-        kwargs = {"news": False}
+        kwargs = {"news": None}
         server._apply_smart_defaults("Python tutorial", kwargs)
-        assert kwargs["news"] is False
+        assert kwargs["news"] is None
 
 
 class TestFilterByDomains:

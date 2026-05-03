@@ -37,7 +37,7 @@ graph TB
         Proxy[Proxy Failover<br/>direct only by default]
         Quota[Quota Manager<br/>~/.cache/pivot-web-search/quota.json<br/>filelock + corruption recovery]
         Config[Hot-reload Config<br/>providers.yaml / proxies.yaml / fetch.yaml]
-        Lock[Thread Safety<br/>threading.Lock on caches]
+        Lock[Concurrency<br/>asyncio.Lock on caches]
         SSRF[SSRF Protection<br/>DNS resolve + IP range check]
         Redirect[SafeRedirectHandler<br/>pre-redirect cross-host block]
     end
@@ -99,7 +99,7 @@ sequenceDiagram
     else super_mode=true
         S->>R: get all enabled providers
         R->>Q: filter exhausted providers
-        S->>P: parallel search (ThreadPool)
+        S->>P: parallel search (asyncio.gather)
         P-->>S: results from each provider
         S->>S: deduplicate & rank (dedup_and_rank)
         S-->>LLM: merged markdown results
@@ -205,12 +205,14 @@ pivot-web-search/
 ├── pivot_web_search_mcp/
 │   ├── __init__.py
 │   ├── __main__.py          # Entry: mcp.run(transport="stdio")
-│   ├── server.py            # FastMCP server, 3 tools
-│   ├── search.py            # Core: search, proxy fallback, extraction, dedup_and_rank
+│   ├── server.py            # FastMCP server, 3 tools, smart defaults
+│   ├── search.py            # Core: search, proxy fallover, extraction, dedup_and_rank
 │   ├── providers.py         # ProviderRegistry, adapters, config loaders
+│   ├── routing.py           # Tuple-sort routing, circuit breaker, pacing pressure
 │   ├── fetch.py             # SPA detection, JS renderer dispatch
+│   ├── logging.py           # Centralized logging (stderr + optional file)
 │   └── quota.py             # Per-provider quota tracking, filelock (cross-platform)
-├── tests/                   # 147+ tests (pytest), 7 modules
+├── tests/                   # 200 tests (pytest-asyncio), 13 modules
 ├── skills/pivot-web-search/       # Skill definition for Claude Code
 └── docs/                    # Architecture diagram, archived design docs
 ```
@@ -225,4 +227,4 @@ pivot-web-search/
 6. **Proxy failover** — every HTTP call goes through the proxy chain (direct by default, configurable)
 7. **Security by default** — SSRF protection, pre-redirect blocking, credential redaction
 8. **Cross-platform** — filelock instead of fcntl, works on Windows/macOS/Linux
-9. **Thread-safe** — all shared mutable state protected by `threading.Lock`
+9. **Async-safe** — shared mutable state protected by `asyncio.Lock`; config loaders use `threading.Lock`

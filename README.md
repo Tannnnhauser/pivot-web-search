@@ -4,7 +4,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
-[![Tests: 190+](https://img.shields.io/badge/tests-190%2B%20passing-brightgreen.svg)]()
+[![Tests: 200](https://img.shields.io/badge/tests-200%20passing-brightgreen.svg)]()
 
 ## What Is This?
 
@@ -37,7 +37,7 @@ This plugin solves these problems by combining multiple search backends with qua
 - **[uv](https://docs.astral.sh/uv/)** — the plugin launcher (manages Python and dependencies automatically)
 - At least one search provider configured (DDG works with no API key)
 
-> **Recommended:** Configure at least one free API key — [Tavily](https://tavily.com) (1000 credits/month, no credit card) or [Brave](https://brave.com/search/api/) (2000 queries/month). DDG is a free fallback but can be unreliable under heavy use.
+> **Recommended:** Configure at least one free API key — [Tavily](https://tavily.com) (1000 credits/month, no credit card) or [Brave](https://brave.com/search/api/) (1000 queries/month, credit card required). DDG is a free fallback but can be unreliable under heavy use.
 
 ## Plugin Installation
 
@@ -62,7 +62,7 @@ The plugin prompts for configuration at install time:
 | **Brave Search API Key** | Stored in system keychain. Leave empty to skip. |
 | **Gemini API Key** | Stored in system keychain. Leave empty to skip. |
 | **Proxy URLs** | Comma-separated, priority order. `direct` = no proxy (default: `direct`) |
-| **Gemini daily quota** | Optional. Limits Gemini grounded searches per day (free tier: 500 RPD, resets at PT midnight). |
+| **Gemini daily quota** | Optional. Limits Gemini grounded searches per day (resets at PT midnight). Check your limit at [AI Studio](https://aistudio.google.com/rate-limit). |
 
 DDG needs no API key. Providers without a key are automatically skipped during failover.
 
@@ -88,7 +88,7 @@ When running manually, set API keys as environment variables:
 ```sh
 export TAVILY_API_KEY=tvly-...
 export BRAVE_API_KEY=BSA...
-export GEMINI_SEARCH_API_KEY=AI...
+export GEMINI_SEARCH_API_KEY=AI...   # or GOOGLE_STUDIO_API_KEY
 ```
 
 After manual installation, configure providers and proxies by editing the YAML files in the `config/` directory. To register the server with Claude Code, add it to your `.mcp.json` or run:
@@ -179,23 +179,27 @@ Install-time settings (via `userConfig`) are injected as environment variables a
 providers:
   - name: ddg
     type: ddg
+    tier: free
     enabled: true
     priority: 10          # lower = tried first
 
   - name: tavily
     type: tavily
+    tier: paid
     enabled: true
     priority: 20
     api_key_env: TAVILY_API_KEY
 
   - name: brave
     type: brave
+    tier: paid
     enabled: true
     priority: 30
     api_key_env: BRAVE_API_KEY
 
   - name: gemini
     type: gemini
+    tier: daily
     enabled: true
     priority: 40
     api_key_env: GEMINI_SEARCH_API_KEY
@@ -245,9 +249,8 @@ proxies:
 Controls WebFetch behavior including JavaScript rendering fallback:
 
 ```yaml
-js_renderer: null         # null (default), "playwright", or "tavily"
+js_renderer: none         # none (default), "playwright", or "tavily"
 max_chars: 100000         # content truncation limit
-cache_ttl: 900            # response cache TTL in seconds (15 min)
 ```
 
 Set `js_renderer: playwright` for JavaScript-heavy sites (requires `uv sync --extra browser` or `pip install pivot-web-search-mcp[browser]`).
@@ -281,7 +284,7 @@ API usage is tracked across sessions in `~/.cache/pivot-web-search/quota.json`:
 | **DuckDuckGo** | Not tracked | Unlimited | Free, no API key needed |
 | **Tavily** | API sync | 1000 credits/month | Calls `GET /usage` at startup for real credit data |
 | **Brave** | Response headers | Rolling 30-day window | Parses `X-RateLimit-Remaining` / `X-RateLimit-Reset` headers |
-| **Gemini** | Local counting (daily) | 500 RPD (resets at PT midnight) | Set limit via `PIVOT_WEB_SEARCH_GEMINI_QUOTA` env var |
+| **Gemini** | Local counting (daily) | Varies by account (resets at PT midnight) | Set limit via `PIVOT_WEB_SEARCH_GEMINI_QUOTA` env var |
 
 Quota-aware scheduling prefers providers with lower usage. Providers at 100% are skipped entirely. Paid providers are ranked by pacing pressure (usage_pct / elapsed_time_pct) so that over-budget providers are naturally deprioritized. Resets automatically on calendar month rollover.
 
@@ -304,14 +307,14 @@ config/                 YAML config for providers, proxies, and fetch (hot-reloa
 scripts/
   health-check.py       Startup probe — reports provider availability and quota
   pretool-check.py      PreToolUse hook script — fail-open tool blocker
-tests/                  190+ tests across 12 modules (pytest-asyncio)
+tests/                  200 tests across 13 modules (pytest-asyncio)
 ```
 
 ## Testing
 
 ```sh
 uv sync --extra dev                   # install dev dependencies
-pytest -m "not integration"           # 158+ offline tests (~4s)
+pytest -m "not integration"           # 193 offline tests (~4s)
 pytest                                # all tests including live API integration (requires API keys)
 ```
 

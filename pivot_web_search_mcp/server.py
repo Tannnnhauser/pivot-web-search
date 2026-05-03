@@ -24,10 +24,14 @@ from . import quota as _quota
 from . import search
 from .logging import log
 from .providers import (
-    ProviderRegistry, SearchResult, load_proxies, reload_proxies,
-    get_proxy_config_source, get_fetch_config_source,
+    ProviderRegistry,
+    SearchResult,
+    get_fetch_config_source,
+    get_proxy_config_source,
+    load_proxies,
+    reload_proxies,
 )
-from .routing import CircuitBreaker, route_providers, pick_recovery_candidate
+from .routing import CircuitBreaker, pick_recovery_candidate, route_providers
 from .search import dedup_and_rank
 
 
@@ -223,7 +227,7 @@ def _apply_smart_defaults(query, kwargs):
     """Detect query characteristics and set soft defaults for unset parameters."""
     if kwargs.get("timelimit") is None and _TIME_SENSITIVE_PATTERN.search(query):
         kwargs["timelimit"] = "m"
-    if not kwargs.get("news") and _NEWS_PATTERN.search(query):
+    if kwargs.get("news") is None and _NEWS_PATTERN.search(query):
         kwargs["news"] = True
     return kwargs
 
@@ -271,7 +275,7 @@ async def WebSearch(
     max_results: int = 5,
     provider: str = "auto",
     super_mode: bool = False,
-    news: bool = False,
+    news: bool | None = None,
     timelimit: str | None = None,
     include_answer: bool = False,
     search_depth: str = "basic",

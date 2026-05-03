@@ -123,6 +123,7 @@ class DdgProvider(SearchProvider):
     async def health_check(self):
         try:
             from ddgs import DDGS  # noqa: F401
+
             from . import search as s
             client = await s._get_client()
             resp = await client.head("https://duckduckgo.com/", timeout=3.0)

@@ -43,7 +43,7 @@
     "gemini_daily_quota": {
       "type": "number",
       "title": "Gemini daily quota",
-      "description": "Daily grounded search limit (resets at PT midnight). Free tier: 500 RPD. Leave empty for no limit.",
+      "description": "Daily grounded search limit (resets at PT midnight). Check your limit at https://aistudio.google.com/rate-limit. Leave empty for no limit.",
       "required": false
     }
   }
