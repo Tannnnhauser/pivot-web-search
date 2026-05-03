@@ -249,7 +249,8 @@ def route_providers(providers, breaker: CircuitBreaker, *, is_news: bool = False
             usage = _quota.get_usage_pct(p.name)
             if usage > HIGH_WATER_PCT and _hours_until_pt_midnight() > HIGH_WATER_MIN_HOURS:
                 rank = 2
-                log(f"{p.name} demoted to paid tier (usage {usage:.0f}%, {_hours_until_pt_midnight():.1f}h until reset)")
+                hours_left = _hours_until_pt_midnight()
+                log(f"{p.name} demoted to paid tier (usage {usage:.0f}%, {hours_left:.1f}h until reset)")
 
         # News demotion for DDG
         if is_news and p.provider_type == "ddg" and has_healthy_non_ddg:

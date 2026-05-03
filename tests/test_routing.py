@@ -3,19 +3,16 @@
 import time
 from unittest.mock import patch
 
-import pytest
-
+from pivot_web_search_mcp import quota as _quota
+from pivot_web_search_mcp.providers import SearchProvider
 from pivot_web_search_mcp.routing import (
-    BreakerState,
     CB_COOLDOWN_SECONDS,
+    BreakerState,
     CircuitBreaker,
     compute_pacing_pressure,
     pick_recovery_candidate,
     route_providers,
-    _hours_until_pt_midnight,
 )
-from pivot_web_search_mcp.providers import SearchProvider
-from pivot_web_search_mcp import quota as _quota
 
 
 class FakeProvider(SearchProvider):
@@ -195,9 +192,12 @@ class TestTupleSort:
             FakeProvider("low_pressure", "brave", priority=20, tier="paid"),
         ]
         pressure_map = {"high_pressure": 1.5, "low_pressure": 0.4}
+        def _pressure(n):
+            return pressure_map.get(n, 0.0)
+
         with patch.object(_quota, "is_exhausted", return_value=False), \
              patch.object(_quota, "get_usage_pct", return_value=0.0), \
-             patch("pivot_web_search_mcp.routing.compute_pacing_pressure", side_effect=lambda n: pressure_map.get(n, 0.0)):
+             patch("pivot_web_search_mcp.routing.compute_pacing_pressure", side_effect=_pressure):
             result = route_providers(providers, cb)
         assert [p.name for p in result] == ["low_pressure", "high_pressure"]
 
@@ -256,7 +256,6 @@ class TestPacingPressure:
             assert compute_pacing_pressure("tavily") == 0.0
 
     def test_monthly_midpoint_on_pace(self):
-        from datetime import datetime, timezone
         # Simulate: day 15 of 30-day month, 50% used
         entry = {"used": 500, "limit": 1000, "period": "monthly"}
         with patch.object(_quota, "load_quota", return_value={"tavily": entry}), \
@@ -272,7 +271,7 @@ class TestPacingPressure:
         assert abs(pressure - 1.6) < 0.01
 
     def test_rolling_with_reset_at(self):
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
         future = (datetime.now(timezone.utc) + timedelta(days=15)).isoformat()
         past = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
         entry = {
@@ -318,10 +317,13 @@ class TestHighWaterDemotion:
             FakeProvider("tavily", "tavily", priority=20, tier="paid"),
         ]
         pressure_map = {"tavily": 0.5}
+        def _pressure(n):
+            return pressure_map.get(n, 0.0)
+
         with patch.object(_quota, "is_exhausted", return_value=False), \
              patch.object(_quota, "get_usage_pct", return_value=86.0), \
              patch("pivot_web_search_mcp.routing._hours_until_pt_midnight", return_value=6.0), \
-             patch("pivot_web_search_mcp.routing.compute_pacing_pressure", side_effect=lambda n: pressure_map.get(n, 0.0)):
+             patch("pivot_web_search_mcp.routing.compute_pacing_pressure", side_effect=_pressure):
             result = route_providers(providers, cb)
         # ddg (free, rank 0) → tavily (paid, rank 2 with pressure 0.5) → gem (demoted to rank 2 with metric 0.86)
         names = [p.name for p in result]
