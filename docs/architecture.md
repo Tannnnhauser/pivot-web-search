@@ -86,6 +86,7 @@ graph TB
 sequenceDiagram
     participant LLM as Claude (LLM)
     participant S as server.py
+    participant RT as routing.py
     participant Q as Quota Manager
     participant R as ProviderRegistry
     participant P as Provider (DDG/Tavily/Brave/Gemini)
@@ -98,15 +99,19 @@ sequenceDiagram
         S-->>LLM: formatted content results
     else super_mode=true
         S->>R: get all enabled providers
-        R->>Q: filter exhausted providers
+        S->>Q: filter exhausted providers
         S->>P: parallel search (asyncio.gather)
         P-->>S: results from each provider
         S->>S: deduplicate & rank (dedup_and_rank)
         S-->>LLM: merged markdown results
     else normal mode
         S->>R: get_ordered() providers
-        R->>Q: sort by usage_pct, skip exhausted
-        loop each provider (quota-sorted)
+        S->>RT: route_providers(providers, breaker)
+        RT->>Q: get usage_pct per provider
+        RT->>RT: tuple-sort (tier_rank, metric, priority)
+        RT->>RT: circuit breaker — skip unhealthy
+        RT-->>S: ordered provider list
+        loop each provider (tuple-sorted)
             S->>P: search(query, max_results)
             P-->>S: SearchResult
             alt results >= min_acceptable
@@ -201,7 +206,8 @@ pivot-web-search/
 ├── hooks/
 │   └── hooks.json           # PreToolUse block + SessionStart health
 ├── scripts/
-│   └── health-check.py      # Startup probe (parallel provider check)
+│   ├── health-check.py      # Startup probe (parallel provider check)
+│   └── pretool-check.py     # PreToolUse hook — fail-open tool blocker
 ├── pivot_web_search_mcp/
 │   ├── __init__.py
 │   ├── __main__.py          # Entry: mcp.run(transport="stdio")
@@ -214,7 +220,7 @@ pivot-web-search/
 │   └── quota.py             # Per-provider quota tracking, filelock (cross-platform)
 ├── tests/                   # 200 tests (pytest-asyncio), 13 modules
 ├── skills/pivot-web-search/       # Skill definition for Claude Code
-└── docs/                    # Architecture diagram, archived design docs
+└── docs/                    # Architecture documentation
 ```
 
 ## Key Design Principles
