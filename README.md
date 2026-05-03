@@ -288,7 +288,7 @@ Response parsing uses a data-driven fallback chain:
     priority: 25
     api_format: responses
     endpoint: "https://api.openai.com/v1/responses"
-    model: gpt-4o
+    model: gpt-5.4
     max_tokens: 4000
     timeout: 60
     search_tool: web_search          # or web_search_preview
