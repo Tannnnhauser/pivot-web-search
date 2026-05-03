@@ -4,7 +4,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
-[![Tests: 232](https://img.shields.io/badge/tests-232%20passing-brightgreen.svg)]()
+[![Tests: 239](https://img.shields.io/badge/tests-239%20passing-brightgreen.svg)]()
 
 ## What Is This?
 
@@ -393,14 +393,14 @@ config/                 YAML config for providers, proxies, and fetch (hot-reloa
 scripts/
   health-check.py       Startup probe — reports provider availability and quota
   pretool-check.py      PreToolUse hook script — fail-open tool blocker
-tests/                  232 tests across 14 modules (pytest-asyncio)
+tests/                  239 tests across 14 modules (pytest-asyncio)
 ```
 
 ## Testing
 
 ```sh
 uv sync --extra dev                   # install dev dependencies
-pytest -m "not integration"           # 232 offline tests (~5s)
+pytest -m "not integration"           # 239 offline tests (~5s)
 pytest                                # all tests including live API integration (requires API keys)
 ```
 

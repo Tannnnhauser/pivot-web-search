@@ -283,7 +283,6 @@ def _load_brave_key():
     return os.environ.get("BRAVE_API_KEY", "").strip() or None
 
 
-
 # ---------------------------------------------------------------------------
 # URL validation
 # ---------------------------------------------------------------------------
@@ -731,7 +730,6 @@ async def search_brave_llm_context(query, max_results=20, max_tokens=8192,
     except Exception as e:
         log(f"Brave LLM Context failed: {e}")
         return None
-
 
 
 def _normalize_url(url):
