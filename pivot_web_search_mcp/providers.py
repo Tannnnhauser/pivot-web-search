@@ -33,7 +33,7 @@ _PROXIES_YAML = _PROJECT_ROOT / "config" / "proxies.yaml"
 # ---------------------------------------------------------------------------
 
 try:
-    import yaml
+    import yaml  # noqa: F401
     _HAS_YAML = True
 except ImportError:
     _HAS_YAML = False
@@ -43,8 +43,9 @@ def _load_yaml(path):
     """Load a YAML file. Raises RuntimeError if PyYAML is missing."""
     if not _HAS_YAML:
         raise RuntimeError(f"PyYAML is required to load {path} — run: uv sync")
+    import yaml as _yaml
     with open(path, "r") as f:
-        return yaml.safe_load(f)
+        return _yaml.safe_load(f)
 
 # ---------------------------------------------------------------------------
 # SearchResult
@@ -415,7 +416,7 @@ class JsonApiProvider(SearchProvider):
             data = None
             params_template = self.config.get("request_params", {"q": "{{query}}", "num": "{{max_results}}"})
             params = self._render_template(params_template, ctx)
-            qs = urllib.parse.urlencode(params)
+            qs = urllib.parse.urlencode(params) if isinstance(params, dict) else str(params)
             endpoint = f"{endpoint}?{qs}"
 
         try:

@@ -12,6 +12,7 @@ Backends:
 import asyncio
 import os
 import re
+from typing import Literal
 
 from .logging import log
 
@@ -38,7 +39,10 @@ def is_empty_content(content: str | None, threshold: int = 200) -> bool:
     return False
 
 
-async def render_playwright(url: str, timeout: int = 30000, wait_until: str = "networkidle") -> str | None:
+WaitUntil = Literal["commit", "domcontentloaded", "load", "networkidle"]
+
+
+async def render_playwright(url: str, timeout: int = 30000, wait_until: WaitUntil = "networkidle") -> str | None:
     """Render a URL with Playwright headless browser, then extract with trafilatura.
 
     Returns extracted markdown content or None on failure.

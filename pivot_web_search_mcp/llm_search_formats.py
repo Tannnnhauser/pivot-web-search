@@ -20,14 +20,14 @@ class LlmSearchFormat(ABC):
     """Abstract base for LLM search request/response formats."""
 
     @abstractmethod
-    def build_request(self, query, max_results, config):
+    def build_request(self, query, max_results, config) -> tuple[str, dict, bytes]:
         """Build HTTP request components.
 
         Returns (url, headers, body_bytes).
         """
 
     @abstractmethod
-    def parse_response(self, obj, max_results, provider_name=""):
+    def parse_response(self, obj, max_results, provider_name="") -> tuple[list, str | None]:
         """Parse API response into (results_list, answer_text).
 
         results_list: list of {title, url, snippet} dicts

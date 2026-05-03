@@ -192,7 +192,7 @@ async def _search_super_with_registry(query, max_results, **kwargs):
     search_results = await asyncio.gather(*tasks, return_exceptions=True)
 
     for p, sr in zip(providers, search_results):
-        if isinstance(sr, Exception):
+        if isinstance(sr, BaseException):
             log(f"super: {p.name} failed: {sr}")
             _record_outcome(p, None)
             continue
