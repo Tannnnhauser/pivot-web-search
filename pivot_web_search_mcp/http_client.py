@@ -120,7 +120,7 @@ async def _get_client() -> httpx.AsyncClient:
 async def close_client():
     global _async_client
     if _async_client and not _async_client.is_closed:
-        await _async_client.close()
+        await _async_client.aclose()
         _async_client = None
 
 

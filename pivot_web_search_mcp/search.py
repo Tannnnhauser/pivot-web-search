@@ -143,9 +143,9 @@ async def _async_main():
             search_results = await asyncio.gather(*tasks, return_exceptions=True)
             results_by_provider = {}
             for p, sr in zip(providers, search_results):
-                if isinstance(sr, Exception):
+                if isinstance(sr, BaseException) or sr is None:
                     continue
-                if sr and sr.results:
+                if sr.results:
                     results_by_provider[p.name] = sr.results
                     if sr.answer and not answer:
                         answer = sr.answer

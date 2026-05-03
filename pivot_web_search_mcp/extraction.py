@@ -6,17 +6,14 @@ import json
 import re
 import time
 
+import httpx
+
 from .validation import (
     MAX_FETCH_BYTES,
     _is_binary_content_type,
     _load_tavily_key,
     validate_url,
 )
-
-try:
-    import httpx
-except ImportError:
-    httpx = None  # type: ignore[assignment]
 
 try:
     from .logging import log

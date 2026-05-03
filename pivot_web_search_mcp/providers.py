@@ -79,7 +79,7 @@ class SearchProvider:
         """Returns SearchResult or None on failure."""
         raise NotImplementedError
 
-    async def health_check(self):
+    async def health_check(self) -> tuple[bool, str | None]:
         """Returns (available: bool, detail_or_error: str | None)."""
         return False, "not implemented"
 
