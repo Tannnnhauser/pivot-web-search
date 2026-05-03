@@ -157,7 +157,7 @@ class TestCrossHostRedirect:
             301, headers={"location": "https://evil.com/phish"},
             request=httpx.Request("GET", "https://example.com/page"))
 
-        with patch("pivot_web_search_mcp.search._do_request", new_callable=AsyncMock) as mock_req:
+        with patch("pivot_web_search_mcp.http_client._do_request", new_callable=AsyncMock) as mock_req:
             mock_req.return_value = mock_resp_redirect
             result = await search._fetch_url("https://example.com/page")
             assert result[0] is None
@@ -175,7 +175,7 @@ class TestCrossHostRedirect:
             headers={"content-type": "text/html"},
             request=httpx.Request("GET", "https://example.com/new"))
 
-        with patch("pivot_web_search_mcp.search._do_request", new_callable=AsyncMock) as mock_req:
+        with patch("pivot_web_search_mcp.http_client._do_request", new_callable=AsyncMock) as mock_req:
             mock_req.side_effect = [mock_resp_redirect, mock_resp_final]
             # Use _open_with_fallback directly to test redirect handling
             resp = await search._open_with_fallback("GET", "https://example.com/old")
