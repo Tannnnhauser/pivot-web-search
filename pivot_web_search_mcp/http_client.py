@@ -21,8 +21,10 @@ except ImportError:
 # SSL — use certifi CA bundle if available
 # ---------------------------------------------------------------------------
 try:
+    import ssl
+
     import certifi
-    _SSL_VERIFY = certifi.where()
+    _SSL_VERIFY = ssl.create_default_context(cafile=certifi.where())
 except ImportError:
     _SSL_VERIFY = True
 
