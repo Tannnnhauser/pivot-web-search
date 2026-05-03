@@ -215,6 +215,11 @@ class LlmSearchProvider(SearchProvider):
 
     async def search(self, query, max_results=5, **kwargs):
         api_key = self._get_key()
+
+        if self.config.get("api_key_env") and not api_key:
+            log(f"{self.name}: api_key_env set but key not found, skipping")
+            return None
+
         endpoint, headers, body = self._format.build_request(query, max_results, self.config)
 
         if not endpoint:
@@ -246,7 +251,7 @@ class LlmSearchProvider(SearchProvider):
             return None
 
         results, answer = self._format.parse_response(obj, max_results, self.name)
-        if not results and not answer:
+        if not results:
             return None
 
         return SearchResult(results=results, provider=self.name, answer=answer)
@@ -295,6 +300,16 @@ class GeminiProvider(LlmSearchProvider):
             from . import search as s
             resp = await s._open_with_fallback(
                 "POST", endpoint, headers=headers, data=body, timeout=timeout)
+
+            if resp.status_code >= 400:
+                try:
+                    err_obj = resp.json()
+                except Exception:
+                    err_obj = {}
+                msg = self._format.parse_error(resp.status_code, err_obj)
+                log(f"{self.name} HTTP {resp.status_code}: {msg}")
+                return None
+
             obj = resp.json()
         except Exception as e:
             log(f"{self.name} failed: {e}")

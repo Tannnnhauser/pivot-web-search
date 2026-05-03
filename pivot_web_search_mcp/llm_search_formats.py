@@ -110,8 +110,7 @@ class ChatCompletionsFormat(LlmSearchFormat):
             ]
             if url_citations:
                 seen_urls = set()
-                for a in url_citations[:max_results]:
-                    # OpenAI Chat Completions annotations nest under url_citation key
+                for a in url_citations:
                     cite = a.get("url_citation", a)
                     url = str(cite.get("url", ""))
                     if url and url not in seen_urls:
@@ -121,6 +120,8 @@ class ChatCompletionsFormat(LlmSearchFormat):
                             "url": url,
                             "snippet": "",
                         })
+                        if len(results) >= max_results:
+                            break
                 return results, answer
 
             if annotations:
@@ -179,6 +180,7 @@ class ResponsesFormat(LlmSearchFormat):
     def parse_response(self, obj, max_results, provider_name=""):
         results = []
         answer = None
+        seen_urls = set()
 
         output = obj.get("output", [])
 
@@ -193,7 +195,6 @@ class ResponsesFormat(LlmSearchFormat):
                 if not answer:
                     answer = content.get("text", "")
                 annotations = content.get("annotations", [])
-                seen_urls = set()
                 for a in annotations:
                     if a.get("type") != "url_citation":
                         continue

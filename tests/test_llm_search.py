@@ -513,6 +513,7 @@ class TestGeminiProviderRefactored:
     @pytest.mark.asyncio
     async def test_search_success(self):
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.json.return_value = {
             "candidates": [{
                 "content": {"parts": [{"text": "Gemini says"}]},
@@ -542,6 +543,7 @@ class TestGeminiProviderRefactored:
     @pytest.mark.asyncio
     async def test_search_sets_goog_api_key_header(self):
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.json.return_value = {
             "candidates": [{
                 "content": {"parts": [{"text": "A"}]},
@@ -561,3 +563,161 @@ class TestGeminiProviderRefactored:
                 headers = call_kwargs.kwargs.get("headers") or call_kwargs[1].get("headers", {})
                 assert headers.get("x-goog-api-key") == "my-key"
                 assert "Authorization" not in headers
+
+    @pytest.mark.asyncio
+    async def test_search_http_error(self):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 429
+        mock_resp.json.return_value = {"error": {"message": "Quota exceeded"}}
+
+        p = GeminiProvider("gemini", config={})
+        with patch.dict("os.environ", {"GEMINI_SEARCH_API_KEY": "key"}, clear=False):
+            with patch("pivot_web_search_mcp.search._open_with_fallback", new_callable=AsyncMock) as mock_fetch:
+                mock_fetch.return_value = mock_resp
+                result = await p.search("query")
+
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for review findings
+# ---------------------------------------------------------------------------
+
+
+class TestRegressionFixes:
+    """Tests for bugs found during code review."""
+
+    def test_responses_dedup_across_content_blocks(self):
+        """seen_urls must be global across all output_text blocks."""
+        fmt = ResponsesFormat()
+        obj = {
+            "output": [{
+                "type": "message",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "First block",
+                        "annotations": [
+                            {"type": "url_citation", "url": "https://dup.com", "title": "A"},
+                            {"type": "url_citation", "url": "https://unique1.com", "title": "B"},
+                        ],
+                    },
+                    {
+                        "type": "output_text",
+                        "text": "Second block",
+                        "annotations": [
+                            {"type": "url_citation", "url": "https://dup.com", "title": "A"},
+                            {"type": "url_citation", "url": "https://unique2.com", "title": "C"},
+                        ],
+                    },
+                ],
+            }],
+        }
+        results, _ = fmt.parse_response(obj, 10)
+        urls = [r["url"] for r in results]
+        assert urls.count("https://dup.com") == 1
+        assert len(results) == 3
+
+    def test_responses_dedup_across_message_items(self):
+        """seen_urls must be global across multiple message items in output."""
+        fmt = ResponsesFormat()
+        obj = {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "Msg 1",
+                        "annotations": [
+                            {"type": "url_citation", "url": "https://shared.com", "title": "S"},
+                        ],
+                    }],
+                },
+                {
+                    "type": "message",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "Msg 2",
+                        "annotations": [
+                            {"type": "url_citation", "url": "https://shared.com", "title": "S"},
+                            {"type": "url_citation", "url": "https://new.com", "title": "N"},
+                        ],
+                    }],
+                },
+            ],
+        }
+        results, _ = fmt.parse_response(obj, 10)
+        urls = [r["url"] for r in results]
+        assert urls.count("https://shared.com") == 1
+        assert len(results) == 2
+
+    def test_chat_completions_annotations_dedup_before_truncate(self):
+        """Deduplication must happen before max_results truncation."""
+        fmt = ChatCompletionsFormat()
+        obj = {
+            "choices": [{
+                "message": {
+                    "content": "Answer",
+                    "annotations": [
+                        {"type": "url_citation", "url": "https://dup.com", "title": "D"},
+                        {"type": "url_citation", "url": "https://dup.com", "title": "D"},
+                        {"type": "url_citation", "url": "https://dup.com", "title": "D"},
+                        {"type": "url_citation", "url": "https://a.com", "title": "A"},
+                        {"type": "url_citation", "url": "https://b.com", "title": "B"},
+                        {"type": "url_citation", "url": "https://c.com", "title": "C"},
+                    ],
+                },
+            }],
+        }
+        results, _ = fmt.parse_response(obj, 3)
+        assert len(results) == 3
+        urls = [r["url"] for r in results]
+        assert "https://dup.com" in urls
+        assert "https://a.com" in urls
+        assert "https://b.com" in urls
+
+    @pytest.mark.asyncio
+    async def test_llm_search_skips_when_key_env_set_but_missing(self):
+        """Provider should skip cleanly when api_key_env is configured but env var absent."""
+        p = LlmSearchProvider("test", config={
+            "api_format": "chat_completions",
+            "endpoint": "https://api.example.com/v1",
+            "model": "m",
+            "api_key_env": "DEFINITELY_NOT_SET_XYZ",
+        })
+
+        with patch.dict("os.environ", {}, clear=False):
+            if "DEFINITELY_NOT_SET_XYZ" in __import__("os").environ:
+                del __import__("os").environ["DEFINITELY_NOT_SET_XYZ"]
+            result = await p.search("query")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_llm_search_answer_only_returns_none(self):
+        """Provider returns None when response has answer but no results."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "choices": [{"message": {"content": "Answer without any search results"}}],
+        }
+
+        p = LlmSearchProvider("test", config={
+            "api_format": "chat_completions",
+            "endpoint": "https://api.example.com/v1",
+            "model": "m",
+        })
+
+        with patch("pivot_web_search_mcp.search._open_with_fallback", new_callable=AsyncMock) as mock_fetch:
+            mock_fetch.return_value = mock_resp
+            result = await p.search("query")
+
+        assert result is None
+
+    def test_parse_error_extracts_message(self):
+        """parse_error should extract error message from response body."""
+        from pivot_web_search_mcp.llm_search_formats import ChatCompletionsFormat
+        fmt = ChatCompletionsFormat()
+        assert fmt.parse_error(401, {"error": {"message": "Unauthorized"}}) == "Unauthorized"
+        assert fmt.parse_error(500, {"error": "Server error"}) == "Server error"
+        assert fmt.parse_error(503, "plain text") == "HTTP 503"
