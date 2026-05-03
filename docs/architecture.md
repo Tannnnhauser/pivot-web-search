@@ -174,7 +174,7 @@ graph LR
     PN --> Q
 ```
 
-> Built-in adapters: DDG, Tavily, Brave, Gemini, SearXNG, and a generic `json_api` adapter for any REST search API. New adapters are one class.
+> Built-in adapters: DDG, Tavily, Brave, Gemini, SearXNG, and a generic `json_api` adapter for any REST search API. New adapters are one class. Both `searxng` and `json_api` types can be instantiated multiple times with different names — each instance gets independent priority, quota tracking, and circuit breaker state.
 
 ## WebFetch JS Fallback
 

@@ -40,6 +40,8 @@ providers:
   #   format: json
 
   # Example: generic JSON search API (e.g. Serper)
+  # You can define multiple json_api instances with different names —
+  # each gets independent priority, quota tracking, and circuit breaker.
   # - name: serper
   #   type: json_api
   #   enabled: false
@@ -54,6 +56,23 @@ providers:
   #     num: "{{max_results}}"
   #   response_mapping:
   #     results_path: "organic"
+  #     title: "title"
+  #     url: "link"
+  #     snippet: "snippet"
+
+  # - name: google-cse
+  #   type: json_api
+  #   enabled: false
+  #   priority: 35
+  #   endpoint: "https://www.googleapis.com/customsearch/v1"
+  #   api_key_env: GOOGLE_CSE_KEY
+  #   method: GET
+  #   request_params:
+  #     q: "{{query}}"
+  #     num: "{{max_results}}"
+  #     cx: "your-search-engine-id"
+  #   response_mapping:
+  #     results_path: "items"
   #     title: "title"
   #     url: "link"
   #     snippet: "snippet"

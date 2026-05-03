@@ -210,6 +210,9 @@ providers:
     priority: 50
     endpoint: "http://localhost:8080/search"
 
+  # You can define multiple json_api instances — each with a unique name,
+  # independent priority, quota tracking, and circuit breaker.
+
   - name: custom-api
     type: json_api
     enabled: false
@@ -225,6 +228,22 @@ providers:
       title: "title"
       url: "link"
       snippet: "description"
+
+  - name: serper
+    type: json_api
+    enabled: false
+    priority: 65
+    endpoint: "https://google.serper.dev/search"
+    api_key_env: SERPER_API_KEY
+    method: POST
+    request_body:
+      q: "{{query}}"
+      num: "{{max_results}}"
+    response_mapping:
+      results_path: "organic"
+      title: "title"
+      url: "link"
+      snippet: "snippet"
 
   # SearXNG, json_api, etc. — see config/providers.yaml for full examples
 ```
