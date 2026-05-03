@@ -226,9 +226,16 @@ class LlmSearchProvider(SearchProvider):
             log(f"{self.name}: no endpoint configured")
             return None
 
+        self._prepare_auth(api_key, headers)
+        return await self._execute_request(endpoint, headers, body, max_results)
+
+    def _prepare_auth(self, api_key, headers):
+        """Inject auth into headers. Override in subclasses for different auth schemes."""
         if api_key and "Authorization" not in headers and "x-goog-api-key" not in headers:
             headers["Authorization"] = f"Bearer {api_key}"
 
+    async def _execute_request(self, endpoint, headers, body, max_results):
+        """Shared HTTP dispatch + response parsing."""
         timeout = self.config.get("timeout", 30)
 
         try:
@@ -292,34 +299,13 @@ class GeminiProvider(LlmSearchProvider):
             return None
 
         endpoint, headers, body = self._format.build_request(query, max_results, self.config)
-        headers["x-goog-api-key"] = api_key
+        self._prepare_auth(api_key, headers)
+        return await self._execute_request(endpoint, headers, body, max_results)
 
-        timeout = self.config.get("timeout", 30)
-
-        try:
-            from . import search as s
-            resp = await s._open_with_fallback(
-                "POST", endpoint, headers=headers, data=body, timeout=timeout)
-
-            if resp.status_code >= 400:
-                try:
-                    err_obj = resp.json()
-                except Exception:
-                    err_obj = {}
-                msg = self._format.parse_error(resp.status_code, err_obj)
-                log(f"{self.name} HTTP {resp.status_code}: {msg}")
-                return None
-
-            obj = resp.json()
-        except Exception as e:
-            log(f"{self.name} failed: {e}")
-            return None
-
-        results, answer = self._format.parse_response(obj, max_results, self.name)
-        if not results:
-            return None
-
-        return SearchResult(results=results, provider=self.name, answer=answer)
+    def _prepare_auth(self, api_key, headers):
+        """Gemini uses x-goog-api-key instead of Bearer token."""
+        if api_key:
+            headers["x-goog-api-key"] = api_key
 
     async def health_check(self):
         key = self._get_key()
