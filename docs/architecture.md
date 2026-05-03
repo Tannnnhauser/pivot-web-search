@@ -174,7 +174,7 @@ graph LR
     PN --> Q
 ```
 
-> Built-in adapters: DDG, Tavily, Brave, Gemini, SearXNG, and a generic `json_api` adapter for any REST search API. New adapters are one class.
+> Built-in adapters: DDG, Tavily, Brave, Gemini, SearXNG, a generic `json_api` adapter for any REST search API, and `llm_search` for any LLM with built-in web search grounding (Perplexity Sonar Pro, OpenAI web_search, SAP AI Core, etc.). New adapters are one class. `searxng`, `json_api`, and `llm_search` types can be instantiated multiple times with different names — each instance gets independent priority, quota tracking, and circuit breaker state. The `llm_search` adapter uses a Strategy pattern (`LlmSearchFormat`) with pluggable format handlers (`chat_completions`, `responses`, `gemini`).
 
 ## WebFetch JS Fallback
 
@@ -214,11 +214,12 @@ pivot-web-search/
 │   ├── server.py            # FastMCP server, 3 tools, smart defaults
 │   ├── search.py            # Core: search, proxy fallover, extraction, dedup_and_rank
 │   ├── providers.py         # ProviderRegistry, adapters, config loaders
+│   ├── llm_search_formats.py # Strategy pattern for LLM search API formats
 │   ├── routing.py           # Tuple-sort routing, circuit breaker, pacing pressure
 │   ├── fetch.py             # SPA detection, JS renderer dispatch
 │   ├── logging.py           # Centralized logging (stderr + optional file)
 │   └── quota.py             # Per-provider quota tracking, filelock (cross-platform)
-├── tests/                   # 200 tests (pytest-asyncio), 13 modules
+├── tests/                   # 239 tests (pytest-asyncio), 14 modules
 ├── skills/pivot-web-search/       # Skill definition for Claude Code
 └── docs/                    # Architecture documentation
 ```

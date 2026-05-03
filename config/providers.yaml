@@ -40,6 +40,8 @@ providers:
   #   format: json
 
   # Example: generic JSON search API (e.g. Serper)
+  # You can define multiple json_api instances with different names —
+  # each gets independent priority, quota tracking, and circuit breaker.
   # - name: serper
   #   type: json_api
   #   enabled: false
@@ -57,3 +59,53 @@ providers:
   #     title: "title"
   #     url: "link"
   #     snippet: "snippet"
+
+  # - name: google-cse
+  #   type: json_api
+  #   enabled: false
+  #   priority: 35
+  #   endpoint: "https://www.googleapis.com/customsearch/v1"
+  #   api_key_env: GOOGLE_CSE_KEY
+  #   method: GET
+  #   request_params:
+  #     q: "{{query}}"
+  #     num: "{{max_results}}"
+  #     cx: "your-search-engine-id"
+  #   response_mapping:
+  #     results_path: "items"
+  #     title: "title"
+  #     url: "link"
+  #     snippet: "snippet"
+
+  # Example: LLM-based search providers (chat_completions format)
+  # Any OpenAI-compatible endpoint with built-in web search grounding.
+  # Supports: Perplexity Sonar Pro, SAP AI Core, or any /chat/completions API
+  # that returns search_results, annotations, or citations in the response.
+  # - name: sonar-pro
+  #   type: llm_search
+  #   tier: daily
+  #   priority: 15
+  #   api_format: chat_completions
+  #   endpoint: "https://api.ai.example.com/v2/chat/completions"
+  #   model: sonar-pro
+  #   max_tokens: 500
+  #   timeout: 45
+  #   system_prompt: "You are a search assistant. Provide a concise answer with source citations."
+  #   headers:
+  #     AI-Resource-Group: default
+  #   api_key_env: AI_CORE_TOKEN
+
+  # Example: LLM-based search providers (responses format)
+  # OpenAI Responses API (/responses) with web_search tool.
+  # - name: gpt-web-search
+  #   type: llm_search
+  #   tier: paid
+  #   priority: 25
+  #   api_format: responses
+  #   endpoint: "https://api.openai.com/v1/responses"
+  #   model: gpt-4o
+  #   max_tokens: 4000
+  #   timeout: 60
+  #   search_tool: web_search
+  #   search_context_size: medium
+  #   api_key_env: OPENAI_API_KEY

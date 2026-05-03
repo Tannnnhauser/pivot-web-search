@@ -54,8 +54,6 @@ DDG_BACKENDS = ["auto", "lite", "html"]
 _DDG_RETRY_DELAY = 0.3
 TAVILY_URL = "https://api.tavily.com/search"
 BRAVE_URL = "https://api.search.brave.com/res/v1/web/search"
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models"
-GEMINI_MODEL = "gemini-2.5-flash"
 MAX_FETCH_BYTES = 10 * 1024 * 1024  # 10 MB download cap
 MAX_CONTENT_CHARS = 100_000  # 100K chars markdown truncation
 FETCH_CACHE_TTL = 15 * 60  # 15 minutes
@@ -283,14 +281,6 @@ def _load_tavily_key():
 
 def _load_brave_key():
     return os.environ.get("BRAVE_API_KEY", "").strip() or None
-
-
-def _load_gemini_key():
-    for env_var in ("GEMINI_SEARCH_API_KEY", "GOOGLE_STUDIO_API_KEY"):
-        key = os.environ.get(env_var, "").strip()
-        if key:
-            return key
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -740,60 +730,6 @@ async def search_brave_llm_context(query, max_results=20, max_tokens=8192,
     except Exception as e:
         log(f"Brave LLM Context failed: {e}")
         return None
-
-
-async def search_gemini(query, max_results=5):
-    """Gemini Search via Google Search grounding. Returns (results, answer) or None."""
-    key = _load_gemini_key()
-    if not key:
-        log("No GEMINI_SEARCH_API_KEY, skipping Gemini")
-        return None
-
-    url = f"{GEMINI_URL}/{GEMINI_MODEL}:generateContent"
-    payload = {
-        "contents": [{"parts": [{"text": f"Search the web for: {query}"}]}],
-        "tools": [{"google_search": {}}],
-    }
-    data = json.dumps(payload).encode("utf-8")
-    try:
-        resp = await _open_with_fallback(
-            "POST", url,
-            headers={"Content-Type": "application/json", "x-goog-api-key": key},
-            data=data, timeout=30)
-        obj = resp.json()
-    except Exception as e:
-        log(f"Gemini failed: {e}")
-        return None
-
-    cand = (obj.get("candidates") or [{}])[0]
-    gm = cand.get("groundingMetadata", {})
-    chunks = gm.get("groundingChunks", [])
-    supports = gm.get("groundingSupports", [])
-
-    if not chunks:
-        log("Gemini returned no grounding chunks")
-        return None
-
-    chunk_snippets = {i: [] for i in range(len(chunks))}
-    for s in supports:
-        text = s.get("segment", {}).get("text", "").strip()
-        if text:
-            for idx in s.get("groundingChunkIndices", []):
-                if idx in chunk_snippets:
-                    chunk_snippets[idx].append(text)
-
-    results = []
-    for i, c in enumerate(chunks[:max_results]):
-        web = c.get("web", {})
-        snippet_parts = chunk_snippets.get(i, [])
-        results.append({
-            "title": web.get("title", ""),
-            "url": web.get("uri", ""),
-            "snippet": " ".join(snippet_parts[:2]) if snippet_parts else "",
-        })
-
-    answer = (cand.get("content", {}).get("parts") or [{}])[0].get("text", "")
-    return results, answer
 
 
 def _normalize_url(url):
