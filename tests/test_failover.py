@@ -1,6 +1,6 @@
 """Failover logic tests — _search_with_registry quality-aware continuation."""
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from pivot_web_search_mcp import server
 from pivot_web_search_mcp.providers import SearchProvider, SearchResult
@@ -81,7 +81,25 @@ class TestSearchWithRegistry:
     async def test_specific_provider_not_found(self, mock_get):
         mock_get.return_value = None
         sr = await server._search_with_registry("test", 5, provider_name="nonexistent")
-        assert sr is None
+        assert isinstance(sr, server._FailureInfo)
+        assert "unknown provider" in sr.failures[0]["error"]
+
+    @patch.object(server._registry, 'get_by_name')
+    async def test_explicit_provider_disabled(self, mock_get):
+        provider = FakeProvider("tavily", _make_results(3), enabled=False)
+        mock_get.return_value = provider
+        sr = await server._search_with_registry("test", 5, provider_name="tavily")
+        assert isinstance(sr, server._FailureInfo)
+        assert "disabled" in sr.failures[0]["error"]
+
+    @patch.object(server._registry, 'get_by_name')
+    async def test_explicit_provider_health_check_fails(self, mock_get):
+        provider = FakeProvider("tavily", _make_results(3))
+        provider.health_check = AsyncMock(return_value=(False, "no API key"))  # type: ignore[method-assign]
+        mock_get.return_value = provider
+        sr = await server._search_with_registry("test", 5, provider_name="tavily")
+        assert isinstance(sr, server._FailureInfo)
+        assert "no API key" in sr.failures[0]["error"]
 
     @patch.object(server._registry, 'get_ordered')
     async def test_min_acceptable_for_small_max(self, mock_ordered):

@@ -129,13 +129,18 @@ async def _search_with_registry(query, max_results, provider_name="auto", **kwar
     """
     if provider_name and provider_name != "auto":
         p = _registry.get_by_name(provider_name)
-        if p and p.enabled:
-            result = await p.search(query, max_results, **kwargs)
-            if result is not None:
-                _quota.record_usage(p.name)
-            _record_outcome(p, result)
-            return result
-        return None
+        if not p:
+            return _FailureInfo(failures=[{"provider": provider_name, "error": f"unknown provider '{provider_name}'"}])
+        if not p.enabled:
+            return _FailureInfo(failures=[{"provider": provider_name, "error": "provider is disabled"}])
+        ok, detail = await p.health_check()
+        if not ok:
+            return _FailureInfo(failures=[{"provider": provider_name, "error": detail or "health check failed"}])
+        result = await p.search(query, max_results, **kwargs)
+        if result is not None:
+            _quota.record_usage(p.name)
+        _record_outcome(p, result)
+        return result
 
     is_news = kwargs.get("news", False)
     ordered = route_providers(_registry.get_ordered(), _breaker, is_news=is_news)
