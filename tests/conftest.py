@@ -17,9 +17,11 @@ def _isolate_quota(tmp_path, monkeypatch):
 def _reset_search_caches():
     """Clear search.py global caches between tests."""
     search._proxy_cache.clear()
+    search._proxy_cache_ts.clear()
     search._fetch_cache.clear()
     yield
     search._proxy_cache.clear()
+    search._proxy_cache_ts.clear()
     search._fetch_cache.clear()
 
 

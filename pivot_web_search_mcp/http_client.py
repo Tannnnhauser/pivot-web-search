@@ -3,6 +3,7 @@
 import asyncio
 import json
 import pathlib
+import time
 import urllib.parse
 
 import httpx
@@ -48,7 +49,9 @@ def _get_proxies():
 _PROXY_CACHE_FILE = pathlib.Path.home() / ".cache" / "pivot-web-search-proxy-cache.json"
 _PROXY_CACHE_FILE_LOCK = FileLock(str(_PROXY_CACHE_FILE) + ".lock")
 _PROXY_CACHE_MAX = 128
+_PROXY_CACHE_TTL = 3600  # 1 hour — stale proxy mappings expire
 _proxy_cache: dict = {}  # hostname -> proxy (None for direct)
+_proxy_cache_ts: dict = {}  # hostname -> timestamp of last successful use
 _proxy_cache_lock = asyncio.Lock()
 
 
@@ -57,20 +60,31 @@ def _load_proxy_cache():
     try:
         with _PROXY_CACHE_FILE_LOCK:
             if _PROXY_CACHE_FILE.exists():
-                loaded = json.loads(_PROXY_CACHE_FILE.read_text())
+                raw = json.loads(_PROXY_CACHE_FILE.read_text())
             else:
-                loaded = {}
+                raw = {}
     except Exception:
-        loaded = {}
+        raw = {}
+    # File format: {"proxies": {host: proxy}, "timestamps": {host: ts}}
+    # Backward compat: old format was just {host: proxy}
+    if "proxies" in raw and isinstance(raw["proxies"], dict):
+        loaded = raw["proxies"]
+        loaded_ts = raw.get("timestamps", {})
+    else:
+        loaded = raw
+        loaded_ts = {}
     _proxy_cache.clear()
     _proxy_cache.update(loaded)
+    _proxy_cache_ts.clear()
+    _proxy_cache_ts.update(loaded_ts)
 
 
 def _save_proxy_cache_sync():
     try:
         with _PROXY_CACHE_FILE_LOCK:
             _PROXY_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            _PROXY_CACHE_FILE.write_text(json.dumps(_proxy_cache))
+            data = {"proxies": dict(_proxy_cache), "timestamps": dict(_proxy_cache_ts)}
+            _PROXY_CACHE_FILE.write_text(json.dumps(data))
     except Exception:
         pass
 
@@ -141,6 +155,13 @@ async def _open_with_fallback(method, url, *, headers=None, data=None, timeout=3
 
     async with _proxy_cache_lock:
         cached = _proxy_cache.get(host)
+        # Evict stale cache entry
+        if cached is not None:
+            ts = _proxy_cache_ts.get(host, 0)
+            if time.time() - ts > _PROXY_CACHE_TTL:
+                del _proxy_cache[host]
+                _proxy_cache_ts.pop(host, None)
+                cached = None
     if cached is not None and cached in proxies:
         ordered = [cached] + [p for p in proxies if p != cached]
     else:
@@ -170,9 +191,14 @@ async def _open_with_fallback(method, url, *, headers=None, data=None, timeout=3
             async with _proxy_cache_lock:
                 if _proxy_cache.get(host) != proxy:
                     _proxy_cache[host] = proxy
+                    _proxy_cache_ts[host] = time.time()
                     while len(_proxy_cache) > _PROXY_CACHE_MAX:
-                        _proxy_cache.pop(next(iter(_proxy_cache)))
+                        evicted = next(iter(_proxy_cache))
+                        _proxy_cache.pop(evicted)
+                        _proxy_cache_ts.pop(evicted, None)
                     await _save_proxy_cache()
+                else:
+                    _proxy_cache_ts[host] = time.time()
             return resp
 
         except httpx.HTTPStatusError as e:
@@ -197,9 +223,14 @@ async def _open_with_fallback(method, url, *, headers=None, data=None, timeout=3
                     async with _proxy_cache_lock:
                         if _proxy_cache.get(host) != proxy:
                             _proxy_cache[host] = proxy
+                            _proxy_cache_ts[host] = time.time()
                             while len(_proxy_cache) > _PROXY_CACHE_MAX:
-                                _proxy_cache.pop(next(iter(_proxy_cache)))
+                                evicted = next(iter(_proxy_cache))
+                                _proxy_cache.pop(evicted)
+                                _proxy_cache_ts.pop(evicted, None)
                             await _save_proxy_cache()
+                        else:
+                            _proxy_cache_ts[host] = time.time()
                     return resp
                 except httpx.HTTPStatusError:
                     raise
@@ -216,6 +247,7 @@ async def _open_with_fallback(method, url, *, headers=None, data=None, timeout=3
             async with _proxy_cache_lock:
                 if proxy == cached and host in _proxy_cache:
                     del _proxy_cache[host]
+                    _proxy_cache_ts.pop(host, None)
                     await _save_proxy_cache()
             if proxy == cached:
                 log(f"Evicted stale cache for {host}")
