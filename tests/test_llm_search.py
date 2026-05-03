@@ -460,7 +460,7 @@ class TestLlmSearchProvider:
         p = LlmSearchProvider("test", config={"api_format": "chat_completions"})
         ok, msg = await p.health_check()
         assert not ok
-        assert "endpoint" in msg
+        assert msg is not None and "endpoint" in msg
 
     @pytest.mark.asyncio
     async def test_health_check_no_key(self):

@@ -32,7 +32,7 @@ class TestSearchWithRegistry:
     async def test_first_provider_sufficient(self, mock_ordered):
         mock_ordered.return_value = [FakeProvider("good", _make_results(5))]
         sr = await server._search_with_registry("test", 5)
-        assert sr is not None
+        assert isinstance(sr, SearchResult)
         assert len(sr.results) == 5
         assert sr.provider == "good"
 
@@ -43,6 +43,7 @@ class TestSearchWithRegistry:
             FakeProvider("good", _make_results(5), priority=20),
         ]
         sr = await server._search_with_registry("test", 5)
+        assert isinstance(sr, SearchResult)
         assert sr.provider == "good"
         assert len(sr.results) == 5
 
@@ -53,7 +54,7 @@ class TestSearchWithRegistry:
             FakeProvider("zero", [], priority=20),
         ]
         sr = await server._search_with_registry("test", 5)
-        assert sr is not None
+        assert isinstance(sr, SearchResult)
         assert len(sr.results) == 1
 
     @patch.object(server._registry, 'get_ordered')
@@ -73,7 +74,7 @@ class TestSearchWithRegistry:
         provider = FakeProvider("tavily", _make_results(3))
         mock_get.return_value = provider
         sr = await server._search_with_registry("test", 5, provider_name="tavily")
-        assert sr is not None
+        assert isinstance(sr, SearchResult)
         assert sr.provider == "tavily"
 
     @patch.object(server._registry, 'get_by_name')
@@ -88,7 +89,7 @@ class TestSearchWithRegistry:
             FakeProvider("one", _make_results(1), priority=10),
         ]
         sr = await server._search_with_registry("test", 1)
-        assert sr is not None
+        assert isinstance(sr, SearchResult)
         assert len(sr.results) == 1
 
 

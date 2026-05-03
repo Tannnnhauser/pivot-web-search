@@ -703,7 +703,7 @@ def load_proxies(config_path=None):
                     url = e.get("url")
                     if url and url.startswith("socks5://"):
                         try:
-                            import socks  # noqa: F401
+                            import socks  # type: ignore[import-not-found]  # noqa: F401
                             result.append(url)
                         except ImportError:
                             log(f"SOCKS5 proxy '{e.get('name', '?')}' skipped — install with: uv pip install pysocks")

@@ -1,7 +1,7 @@
 
 import pytest
 
-from pivot_web_search_mcp import extraction, providers, quota, search, server
+from pivot_web_search_mcp import extraction, http_client, providers, quota, search, server
 
 
 @pytest.fixture(autouse=True)
@@ -43,3 +43,10 @@ def _reset_circuit_breaker():
     server._breaker.reset_all()
     yield
     server._breaker.reset_all()
+
+
+@pytest.fixture(autouse=True)
+async def _close_http_client():
+    """Close the httpx client after each test to prevent socket leaks."""
+    yield
+    await http_client.close_client()
