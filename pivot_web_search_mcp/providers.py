@@ -188,8 +188,90 @@ class BraveProvider(SearchProvider):
         return (True, None) if key else (False, "no API key")
 
 
-class GeminiProvider(SearchProvider):
+class LlmSearchProvider(SearchProvider):
+    """Adapter for LLM-based search via OpenAI-compatible APIs.
+
+    Supports api_format: chat_completions, responses, gemini.
+    Uses strategy pattern — format-specific logic is in llm_search_formats.py.
+    """
+    provider_type = "llm_search"
+
+    def __init__(self, name, priority=100, enabled=True, config=None):
+        super().__init__(name, priority, enabled, config)
+        from .llm_search_formats import FORMAT_REGISTRY
+        fmt_name = self.config.get("api_format", "chat_completions")
+        fmt_cls = FORMAT_REGISTRY.get(fmt_name)
+        if not fmt_cls:
+            log(f"{name}: unknown api_format '{fmt_name}', falling back to chat_completions")
+            from .llm_search_formats import ChatCompletionsFormat
+            fmt_cls = ChatCompletionsFormat
+        self._format = fmt_cls()
+
+    def _get_key(self):
+        env_var = self.config.get("api_key_env")
+        if not env_var:
+            return None
+        return os.environ.get(env_var, "").strip() or None
+
+    async def search(self, query, max_results=5, **kwargs):
+        api_key = self._get_key()
+        endpoint, headers, body = self._format.build_request(query, max_results, self.config)
+
+        if not endpoint:
+            log(f"{self.name}: no endpoint configured")
+            return None
+
+        if api_key and "Authorization" not in headers and "x-goog-api-key" not in headers:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        timeout = self.config.get("timeout", 30)
+
+        try:
+            from . import search as s
+            resp = await s._open_with_fallback(
+                "POST", endpoint, headers=headers, data=body, timeout=timeout)
+
+            if resp.status_code >= 400:
+                try:
+                    err_obj = resp.json()
+                except Exception:
+                    err_obj = {}
+                msg = self._format.parse_error(resp.status_code, err_obj)
+                log(f"{self.name} HTTP {resp.status_code}: {msg}")
+                return None
+
+            obj = resp.json()
+        except Exception as e:
+            log(f"{self.name} failed: {e}")
+            return None
+
+        results, answer = self._format.parse_response(obj, max_results, self.name)
+        if not results and not answer:
+            return None
+
+        return SearchResult(results=results, provider=self.name, answer=answer)
+
+    async def health_check(self):
+        endpoint = self.config.get("endpoint")
+        if not endpoint:
+            return False, "no endpoint"
+        key = self._get_key()
+        if self.config.get("api_key_env") and not key:
+            return False, "no API key"
+        return True, None
+
+
+class GeminiProvider(LlmSearchProvider):
+    """Gemini with Search grounding — thin wrapper over LlmSearchProvider.
+
+    Backward-compatible: keeps type='gemini' and dual-key fallback logic.
+    """
     provider_type = "gemini"
+
+    def __init__(self, name, priority=100, enabled=True, config=None):
+        config = dict(config or {})
+        config.setdefault("api_format", "gemini")
+        super().__init__(name, priority, enabled, config)
 
     def _get_key(self):
         env_var = self.config.get("api_key_env", "GEMINI_SEARCH_API_KEY")
@@ -199,11 +281,29 @@ class GeminiProvider(SearchProvider):
         return key or None
 
     async def search(self, query, max_results=5, **kwargs):
-        from . import search as s
-        gm = await s.search_gemini(query, max_results)
-        if gm is None:
+        api_key = self._get_key()
+        if not api_key:
+            log(f"No API key for {self.name}, skipping")
             return None
-        results, answer = gm
+
+        endpoint, headers, body = self._format.build_request(query, max_results, self.config)
+        headers["x-goog-api-key"] = api_key
+
+        timeout = self.config.get("timeout", 30)
+
+        try:
+            from . import search as s
+            resp = await s._open_with_fallback(
+                "POST", endpoint, headers=headers, data=body, timeout=timeout)
+            obj = resp.json()
+        except Exception as e:
+            log(f"{self.name} failed: {e}")
+            return None
+
+        results, answer = self._format.parse_response(obj, max_results, self.name)
+        if not results:
+            return None
+
         return SearchResult(results=results, provider=self.name, answer=answer)
 
     async def health_check(self):
@@ -369,6 +469,7 @@ _ADAPTER_MAP = {
     "gemini": GeminiProvider,
     "searxng": SearxngProvider,
     "json_api": JsonApiProvider,
+    "llm_search": LlmSearchProvider,
 }
 
 # ---------------------------------------------------------------------------

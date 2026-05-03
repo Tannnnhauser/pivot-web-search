@@ -4,7 +4,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
-[![Tests: 200](https://img.shields.io/badge/tests-200%20passing-brightgreen.svg)]()
+[![Tests: 232](https://img.shields.io/badge/tests-232%20passing-brightgreen.svg)]()
 
 ## What Is This?
 
@@ -21,7 +21,7 @@ Claude Code users on **Amazon Bedrock** (or other API providers) don't get Anthr
 - **Quota-aware scheduling** — tracks API usage per provider, prefers cheapest available, skips exhausted providers.
 - **Per-host proxy cache** — remembers which connection path worked for each hostname. Re-probes automatically on network changes.
 - **Hot-reloadable config** — add/remove/reorder providers and proxies via YAML. Changes apply on the next request.
-- **Pluggable adapters** — built-in support for DuckDuckGo (DDG), Tavily, Brave, Gemini, SearXNG, and a generic `json_api` adapter. Writing a new adapter is one class.
+- **Pluggable adapters** — built-in support for DuckDuckGo (DDG), Tavily, Brave, Gemini, SearXNG, a generic `json_api` adapter, and `llm_search` for any LLM with web search grounding. Writing a new adapter is one class.
 - **Structured error diagnostics** — when all providers fail, returns per-provider failure reasons and actionable suggestions instead of a generic error.
 - **Debug logging** — set `PIVOT_WEB_SEARCH_DEBUG=1` to get timestamped verbose logs at `~/.cache/pivot-web-search/server.log`.
 
@@ -248,6 +248,72 @@ providers:
   # SearXNG, json_api, etc. — see config/providers.yaml for full examples
 ```
 
+### LLM Search Providers (`type: llm_search`)
+
+For LLM-based search — any model with built-in web search grounding (Perplexity Sonar Pro, OpenAI with web_search, SAP AI Core, etc.). These providers return an AI-generated answer plus cited URLs extracted from the response.
+
+This is a power-user feature. Configure by editing `config/providers.yaml` directly.
+
+Two `api_format` paradigms are supported:
+
+**`chat_completions`** — any `/chat/completions`-compatible endpoint with built-in search:
+
+```yaml
+  - name: sonar-pro
+    type: llm_search
+    tier: daily
+    priority: 15
+    api_format: chat_completions
+    endpoint: "https://api.ai.example.com/v2/chat/completions"
+    model: sonar-pro
+    max_tokens: 500
+    timeout: 45
+    system_prompt: "You are a search assistant. Provide a concise answer with source citations."
+    headers:
+      AI-Resource-Group: default
+    api_key_env: AI_CORE_TOKEN
+```
+
+Response parsing uses a data-driven fallback chain:
+1. `search_results` array (Perplexity/Sonar style)
+2. `annotations` with `type: url_citation` in message (OpenAI Chat Completions style)
+3. Top-level `citations` URL array
+
+**`responses`** — OpenAI Responses API (`/responses`) with web_search tool:
+
+```yaml
+  - name: gpt-web-search
+    type: llm_search
+    tier: paid
+    priority: 25
+    api_format: responses
+    endpoint: "https://api.openai.com/v1/responses"
+    model: gpt-4o
+    max_tokens: 4000
+    timeout: 60
+    search_tool: web_search          # or web_search_preview
+    search_context_size: medium      # low, medium, high
+    api_key_env: OPENAI_API_KEY
+```
+
+Additional `responses` format options: `filters` (domain filtering object), `user_location` (location context).
+
+**Common fields:**
+
+| Field | Required | Description |
+|---|---|---|
+| `api_format` | No | `chat_completions` (default) or `responses` |
+| `endpoint` | Yes | Full URL to the API endpoint |
+| `model` | Yes | Model identifier |
+| `api_key_env` | Yes | Environment variable holding the API key (sent as Bearer token) |
+| `max_tokens` | No | Max response tokens (default: 500 for chat_completions, 4000 for responses) |
+| `timeout` | No | Request timeout in seconds (default: 30) |
+| `system_prompt` | No | System prompt (chat_completions only) |
+| `headers` | No | Additional request headers |
+| `web_search_options` | No | Extra search options object (chat_completions only) |
+
+The existing `gemini` type is also backed by LLM search internally (using Google's Search grounding) but keeps its own `type: gemini` for backward compatibility and dual-key fallback logic.
+
 ### `config/proxies.yaml`
 
 ```yaml
@@ -318,6 +384,7 @@ pivot_web_search_mcp/         FastMCP server (stdio) — fully async, exposes 3 
   routing.py            Tuple-sort routing, circuit breaker, pacing pressure
   search.py             Async search backends (httpx), URL extraction, proxy failover, dedup_and_rank
   providers.py          Async provider adapters, registry, config source tracking
+  llm_search_formats.py Strategy pattern for LLM search API formats (chat_completions, responses, gemini)
   fetch.py              SPA detection, async JS renderer dispatch (Playwright/Tavily)
   quota.py              Cross-session quota tracking (filelock, cross-platform)
   logging.py            Centralized logging (stderr + optional file via PIVOT_WEB_SEARCH_DEBUG)
@@ -326,14 +393,14 @@ config/                 YAML config for providers, proxies, and fetch (hot-reloa
 scripts/
   health-check.py       Startup probe — reports provider availability and quota
   pretool-check.py      PreToolUse hook script — fail-open tool blocker
-tests/                  200 tests across 13 modules (pytest-asyncio)
+tests/                  232 tests across 14 modules (pytest-asyncio)
 ```
 
 ## Testing
 
 ```sh
 uv sync --extra dev                   # install dev dependencies
-pytest -m "not integration"           # 193 offline tests (~4s)
+pytest -m "not integration"           # 232 offline tests (~5s)
 pytest                                # all tests including live API integration (requires API keys)
 ```
 
