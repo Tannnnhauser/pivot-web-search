@@ -26,6 +26,7 @@ from .backends import (  # noqa: F401
 )
 from .extraction import (  # noqa: F401
     FETCH_CACHE_MAX,
+    FETCH_CACHE_MAX_BYTES,
     FETCH_CACHE_TTL,
     TAVILY_EXTRACT_URL,
     _extract_nextjs_data,

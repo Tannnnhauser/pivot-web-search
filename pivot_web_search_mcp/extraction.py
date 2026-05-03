@@ -32,10 +32,12 @@ except ImportError:
 
 FETCH_CACHE_TTL = 15 * 60  # 15 minutes
 FETCH_CACHE_MAX = 64  # max cached URLs
+FETCH_CACHE_MAX_BYTES = 50 * 1024 * 1024  # 50 MB total memory budget
 
 _FetchCacheEntry = collections.namedtuple("_FetchCacheEntry", ["content", "content_type", "ts"])
 _fetch_cache: collections.OrderedDict = collections.OrderedDict()
 _fetch_cache_lock = asyncio.Lock()
+_fetch_cache_bytes: int = 0
 
 # ---------------------------------------------------------------------------
 # Tavily Extract API
@@ -84,10 +86,20 @@ async def _fetch_url(url, timeout=30):
 
         # Store in cache
         async with _fetch_cache_lock:
-            _fetch_cache[url] = _FetchCacheEntry(body, ct, time.time())
+            global _fetch_cache_bytes
+            entry = _FetchCacheEntry(body, ct, time.time())
+            entry_size = len(body)
+            _fetch_cache[url] = entry
             _fetch_cache.move_to_end(url)
+            _fetch_cache_bytes += entry_size
+            # Evict by count
             while len(_fetch_cache) > FETCH_CACHE_MAX:
-                _fetch_cache.popitem(last=False)
+                _, evicted = _fetch_cache.popitem(last=False)
+                _fetch_cache_bytes -= len(evicted.content) if evicted.content else 0
+            # Evict by size budget
+            while _fetch_cache_bytes > FETCH_CACHE_MAX_BYTES and _fetch_cache:
+                _, evicted = _fetch_cache.popitem(last=False)
+                _fetch_cache_bytes -= len(evicted.content) if evicted.content else 0
 
         return body, ct
 

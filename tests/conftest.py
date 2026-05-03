@@ -1,7 +1,7 @@
 
 import pytest
 
-from pivot_web_search_mcp import providers, quota, search, server
+from pivot_web_search_mcp import extraction, providers, quota, search, server
 
 
 @pytest.fixture(autouse=True)
@@ -19,10 +19,12 @@ def _reset_search_caches():
     search._proxy_cache.clear()
     search._proxy_cache_ts.clear()
     search._fetch_cache.clear()
+    extraction._fetch_cache_bytes = 0
     yield
     search._proxy_cache.clear()
     search._proxy_cache_ts.clear()
     search._fetch_cache.clear()
+    extraction._fetch_cache_bytes = 0
 
 
 @pytest.fixture(autouse=True)
