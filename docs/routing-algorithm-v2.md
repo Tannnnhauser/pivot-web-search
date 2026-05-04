@@ -1,4 +1,4 @@
-# Routing Algorithm v2: Priority + Quota Gates
+# Routing Algorithm v2: Priority + Quota Gates + Latency Budgets
 
 Final design document for the pivot-web-search provider routing system.
 
@@ -6,17 +6,22 @@ Final design document for the pivot-web-search provider routing system.
 
 **Replaces**: The existing tier-based tuple-sort routing in `routing.py`.
 
+**Design philosophy**: Optimize for **latency first**, then quality, then cost. A CLI user cares about getting answers fast. Quota protection is a warning, not an invisible throttle.
+
 ---
 
 ## 1. Design Principles
 
-1. **User-declared priority** is the primary sort key. Lower number = tried first.
-2. **Quota gates** prevent over-consumption. Exhausted providers are excluded; conserved providers are deferred.
-3. **Circuit breaker** protects against failing providers with exponential backoff.
-4. **Same priority = round-robin** via monotonic call counter per provider.
-5. **Failover on quality**: fewer than 2 results triggers next-provider attempt.
-6. **Single provider never errors**: always returns best-effort results.
-7. **Observability first**: every routing decision is logged with reason.
+1. **Latency first**: Per-provider timeouts and total search budget ensure the user never waits more than 10 seconds.
+2. **User-declared priority** is the primary sort key. Lower number = tried first.
+3. **Quota gates** prevent over-consumption. Exhausted providers are excluded. Usage warnings (not throttling) inform the user.
+4. **Circuit breaker** protects against failing providers with fixed cooldown + Retry-After.
+5. **Same priority = round-robin** via in-memory call counter per provider.
+6. **Hedged requests**: Same-priority providers use parallel probing — start the second after a short delay, take the first good response.
+7. **Failover on quality**: fewer than 2 unique results (or zero keyword overlap) triggers next-provider attempt.
+8. **Single provider never errors**: always returns best-effort results.
+9. **Network-down short-circuit**: 2 consecutive TCP failures → stop trying, return error immediately.
+10. **Observability first**: every routing decision is logged with reason.
 
 ---
 
@@ -47,22 +52,23 @@ sort_key = (effective_priority, call_counter)
 ```
 
 Where:
-- `effective_priority` = declared `priority` if provider is **active**, or `priority + 10000` if provider is **conserved** (deferred)
-- `call_counter` = monotonically incrementing per-provider counter, used to round-robin among same-priority providers
+- `effective_priority` = declared `priority` (from config or smart defaults)
+- `call_counter` = monotonically incrementing per-provider counter (in-memory), used to round-robin among same-priority providers
 
 ### 3.2 Provider States
 
 ```
-ACTIVE      — available for routing (priority unchanged)
-CONSERVED   — available as fallback only (priority += 10000)
-EXHAUSTED   — excluded from routing entirely
+ACTIVE       — available for routing (priority unchanged)
+EXHAUSTED    — excluded from routing entirely (used >= limit)
 CIRCUIT_OPEN — excluded until cooldown expires
 ```
+
+Three states only. No CONSERVED state. No priority manipulation based on usage patterns.
 
 ### 3.3 Pseudocode
 
 ```python
-def select_providers(providers: list[Provider], query_context: QueryContext) -> list[Provider]:
+def select_providers(providers: list[Provider]) -> list[ScoredProvider]:
     """Return ordered list of providers to attempt."""
     
     candidates = []
@@ -84,21 +90,9 @@ def select_providers(providers: list[Provider], query_context: QueryContext) -> 
             log(f"SKIP {p.name}: circuit OPEN, {breaker.time_remaining(p.name):.0f}s remaining")
             continue
         
-        # Gate 3: Conservation check (with hysteresis)
-        conserved = False
-        if p.conserve and not is_exhausted(p):
-            pace_ratio = compute_pace_ratio(p)
-            threshold = CONSERVE_EXIT if p._conserved else CONSERVE_ENTER
-            if pace_ratio > threshold:
-                conserved = True
-                log(f"DEFER {p.name}: pace_ratio={pace_ratio:.2f} > {threshold}, conserving")
-        
-        effective_priority = p.priority + (10000 if conserved else 0)
-        
         candidates.append(ScoredProvider(
             provider=p,
-            sort_key=(effective_priority, p.call_counter),
-            state="CONSERVED" if conserved else "ACTIVE",
+            sort_key=(p.effective_priority, p.call_counter),
             breaker_state=breaker_state,
         ))
     
@@ -108,13 +102,12 @@ def select_providers(providers: list[Provider], query_context: QueryContext) -> 
     return candidates
 
 
-def execute_search(query: str, max_results: int, **kwargs) -> SearchResult | FailureInfo:
-    """Execute search with failover."""
+async def execute_search(query: str, max_results: int, **kwargs) -> SearchResult | FailureInfo:
+    """Execute search with failover, latency budget, and hedged requests."""
     
-    candidates = select_providers(registry.get_enabled(), query_context)
+    candidates = select_providers(registry.get_enabled())
     
     if not candidates:
-        # All-open fallback: find provider closest to cooldown expiry
         recovery = pick_recovery_candidate(registry.get_enabled())
         if recovery:
             candidates = [recovery]
@@ -124,214 +117,340 @@ def execute_search(query: str, max_results: int, **kwargs) -> SearchResult | Fai
     min_acceptable = min(2, max_results)
     best_so_far = None
     failures = []
+    consecutive_tcp_failures = 0
+    budget_deadline = time.monotonic() + TOTAL_BUDGET  # 10s
     
-    for scored in candidates:
-        p = scored.provider
-        
-        try:
-            result = await p.search(query, max_results, **kwargs)
-        except Exception as e:
-            failures.append({"provider": p.name, "error": str(e)})
-            circuit_breaker.record_failure(p.name, error=e)
-            continue
-        
-        if result is None or not result.results:
-            failures.append({"provider": p.name, "error": "no results"})
-            circuit_breaker.record_failure(p.name, error=None)
-            continue
-        
-        # Quality gate: enough results?
-        if len(result.results) >= min_acceptable:
-            circuit_breaker.record_success(p.name)
-            record_usage(p.name)
-            p.call_counter += 1  # advance round-robin
-            log(f"SUCCESS {p.name}: {len(result.results)} results")
-            return result
-        
-        # Partial results: record but continue trying
-        circuit_breaker.record_success(p.name)  # provider worked, just low results
-        record_usage(p.name)
-        p.call_counter += 1
-        
-        if best_so_far is None or len(result.results) > len(best_so_far.results):
-            best_so_far = result
-            log(f"PARTIAL {p.name}: {len(result.results)}/{min_acceptable} results, continuing")
+    # Group candidates by priority for hedging
+    priority_groups = group_by(candidates, key=lambda c: c.sort_key[0])
     
-    # Exhausted all candidates
+    for priority, group in priority_groups.items():
+        if time.monotonic() > budget_deadline:
+            log(f"BUDGET_EXHAUSTED: {TOTAL_BUDGET}s elapsed, returning best_so_far")
+            break
+        
+        remaining = budget_deadline - time.monotonic()
+        
+        if len(group) == 1:
+            # Single provider at this priority — simple sequential
+            result = await _try_provider(group[0], query, max_results, timeout=min(PER_PROVIDER_TIMEOUT, remaining), **kwargs)
+        else:
+            # Multiple same-priority — hedged request
+            result = await _hedged_request(group, query, max_results, timeout=min(PER_PROVIDER_TIMEOUT, remaining), **kwargs)
+        
+        if result is not None:
+            if isinstance(result, FailureInfo):
+                failures.extend(result.failures)
+                # Check network-down
+                if result.reason == "tcp_failure":
+                    consecutive_tcp_failures += 1
+                    if consecutive_tcp_failures >= 2:
+                        return FailureInfo(failures=failures, reason="network_unreachable")
+                continue
+            
+            consecutive_tcp_failures = 0
+            
+            if quality_gate_passes(result.results, query, result.answer):
+                log(f"SUCCESS {result.provider}: {len(result.results)} results")
+                return result
+            
+            # Partial — keep as best_so_far but continue
+            if best_so_far is None or len(result.results) > len(best_so_far.results):
+                best_so_far = result
+                log(f"PARTIAL {result.provider}: {len(result.results)} results, continuing")
+    
     if best_so_far is not None:
-        return best_so_far  # best-effort, even if < min_acceptable
+        return best_so_far
     
     return FailureInfo(failures=failures)
 ```
 
 ---
 
-## 4. Quota Pacing Logic
+## 4. Quota Management
 
-### 4.1 Core Formula
+### 4.1 Design: Simple Exhaustion + Percentage Warning
 
-```python
-pace_ratio = usage_fraction / elapsed_fraction
-```
+No pacing formulas, no conservation state machine, no hysteresis. The quota system has exactly two behaviors:
 
-Where:
-- `usage_fraction = used / limit`  (0.0 to 1.0+)
-- `elapsed_fraction` = fraction of quota period that has passed
+1. **Exhaustion gate**: `used >= limit` → provider excluded from routing entirely.
+2. **Usage warning**: `used / limit >= 0.8` → log a warning (user-visible in status), but **do not change routing behavior**.
 
-### 4.2 Elapsed Fraction by Period Type
+This is intentionally simple. The user declared a priority order. We respect it until the provider literally cannot serve more requests.
 
-| Period | Formula |
-|--------|---------|
-| `daily` | `hour_of_day / 24` (PT timezone, min 1/24 at start of day) |
-| `monthly` | `day_of_month / days_in_month` (UTC, min 1/days_in_month) |
-| `rolling` | `(now - window_start) / (reset_at - window_start)` |
-
-**Division guard**: `elapsed_fraction = max(elapsed_fraction, 0.01)`
-
-### 4.3 State Transitions
+### 4.2 State Transitions
 
 ```
-                  pace_ratio <= 1.0
-    ACTIVE  <─────────────────────────  CONSERVED
-       │                                    ▲
-       │    pace_ratio > CONSERVE_ENTER     │    pace_ratio < CONSERVE_EXIT
-       └────────────────────────────────────┘
-       │
-       │    used >= limit
-       ▼
-   EXHAUSTED
+                used < limit
+ACTIVE  ◄──────────────────── (period reset)
+   │
+   │    used >= limit
+   ▼
+EXHAUSTED
 ```
 
-- **ACTIVE**: `used < limit` AND (`conserve` is false OR `pace_ratio <= CONSERVE_EXIT` OR was never conserved)
-- **CONSERVED**: `used < limit` AND `conserve` is true AND `pace_ratio > CONSERVE_ENTER` (or still > CONSERVE_EXIT if already conserved)
-- **EXHAUSTED**: `used >= limit`
+Two states only. No CONSERVED state. No deferral. No priority manipulation based on usage patterns.
 
-Hysteresis thresholds (prevent flapping on boundary):
-- `CONSERVE_ENTER = 1.5` — enter conservation when pace_ratio exceeds this
-- `CONSERVE_EXIT = 1.2` — exit conservation only when pace_ratio drops below this
+### 4.3 Why No Pacing / Conservation
 
-### 4.4 When `conserve` Triggers Deferral
+The v1 design had `pace_ratio`, hysteresis thresholds, and a CONSERVED state that demoted providers to `priority + 10000`. This created three problems:
 
-Conservation kicks in when the provider is being used significantly faster than its budget allows:
+1. **Invisible throttling**: Users couldn't understand why their preferred provider wasn't being used.
+2. **Over-engineering for CLI**: A developer makes ~20-50 searches per day. Even aggressive usage rarely exhausts a 1000/month Tavily quota.
+3. **Contradicts user intent**: If the user set Tavily at priority 10, they want Tavily first. Demoting it based on math they can't see violates trust.
 
-```python
-def should_conserve(provider) -> bool:
-    if not provider.conserve:
-        return False
-    if not provider.quota or not provider.quota.limit:
-        return False  # no limit declared, nothing to conserve
-    
-    pace_ratio = compute_pace_ratio(provider)
-    
-    # Hysteresis: different thresholds for entering vs exiting conservation
-    if provider._conserved:
-        return pace_ratio > CONSERVE_EXIT   # 1.2 — stay conserved until well below
-    return pace_ratio > CONSERVE_ENTER      # 1.5 — only enter when clearly over-pacing
+**Instead**: If a user is concerned about quota, they can set `quota.limit` to a lower number (e.g., 30/day for a 500/month Gemini plan). Exhaustion is explicit and predictable.
+
+### 4.4 Quota Tracking
+
+Quota data persists to `~/.cache/pivot-web-search/quota.json`:
+
+```json
+{
+  "tavily": {
+    "used": 450,
+    "limit": 1000,
+    "period": "monthly",
+    "month": "2024-02",
+    "source": "api",
+    "last_synced": "2024-02-15T10:30:00Z"
+  },
+  "gemini": {
+    "used": 120,
+    "limit": 500,
+    "period": "daily",
+    "day": "2024-02-15",
+    "source": "config"
+  }
+}
 ```
 
-A conserved provider is NOT excluded. It is demoted to priority + 10000, meaning it will still be tried if all non-conserved providers fail.
+### 4.5 Period Reset Logic
 
-### 4.5 Edge Case: Monthly Provider on Day 1
+| Period | Reset Trigger |
+|--------|--------------|
+| `daily` | UTC date changes (or PT midnight for Gemini, configurable) |
+| `monthly` | Calendar month changes |
+| `rolling` | `now > reset_at` (from provider's response headers) |
 
-On day 1 of a monthly period:
-- `elapsed_fraction = 1 / days_in_month` (e.g., 1/30 = 0.033)
-- Even 1 call out of a 1000-limit quota gives `usage_fraction = 0.001`
-- `pace_ratio = 0.001 / 0.033 = 0.03` (well under 1.0, ACTIVE)
+On reset: `used = 0`. Provider becomes ACTIVE again immediately.
 
-This naturally works. The first few calls never trigger conservation because the usage fraction is so small.
+### 4.6 Warning Thresholds
 
-### 4.6 Edge Case: Provider With No Quota Declaration Gets Rate-Limited
+| Usage % | Behavior |
+|---------|----------|
+| < 80% | Normal operation, no warnings |
+| 80-99% | Log: `QUOTA_WARN {name}: {pct}% used ({used}/{limit})` |
+| 100% | Exclude from routing: `SKIP {name}: quota exhausted ({used}/{limit})` |
 
-If a provider has no `quota` block but returns 429:
-1. The circuit breaker handles this (see Section 5)
-2. After the breaker cooldown, the provider is re-tried
-3. The provider is never marked EXHAUSTED (no limit to compare against)
-4. Recommendation: log a warning suggesting the user add a quota declaration
+Warnings appear in `WebSearchConfig status` output and debug logs. They do NOT change routing order.
+
+### 4.7 Provider With No Quota Declaration
+
+If a provider has no `quota` block:
+- Treated as unlimited — never excluded for quota reasons
+- If it returns 429: circuit breaker handles protection (see Section 5)
+- Log: `WARNING: {name} returned 429 but has no quota configured. Consider adding quota declaration.`
 
 ---
 
-## 5. Circuit Breaker Specifics
+## 5. Circuit Breaker
 
 ### 5.1 Parameters
 
 ```yaml
 circuit_breaker:
-  window_size: 5          # sliding window of recent outcomes
-  consecutive_threshold: 3 # consecutive failures to open
-  rate_threshold: 0.6     # failure rate in window to open (60%)
-  min_samples: 3          # minimum outcomes before rate check applies
-  base_cooldown: 60       # seconds, initial cooldown
-  max_cooldown: 600       # seconds, maximum after backoff
-  backoff_multiplier: 2   # exponential backoff factor
+  consecutive_threshold: 3   # consecutive failures to open
+  cooldown: 60               # seconds, fixed cooldown duration
 ```
+
+Two parameters. No backoff multiplier, no sliding window, no rate threshold. A provider is either working or it's not.
 
 ### 5.2 State Machine
 
 ```
-          record_failure (threshold met)
-CLOSED  ──────────────────────────────────► OPEN
-   ▲                                          │
-   │    record_success                        │ cooldown expires
-   │    (probe succeeded)                     ▼
-   └─────────────────────────────────────  HALF_OPEN
-                                              │
-                     record_failure            │
-                     (probe failed)           │
-                          ▼                   │
-                        OPEN ◄────────────────┘
-                    (cooldown *= backoff_multiplier)
+          3 consecutive failures (or 1x 429)
+CLOSED  ───────────────────────────────────► OPEN
+   ▲                                           │
+   │    probe success                          │ cooldown expires (60s, or Retry-After)
+   │                                           ▼
+   └────────────────────────────────────── HALF_OPEN
+                                               │
+                     probe failure              │
+                          ▼                    │
+                        OPEN ◄─────────────────┘
+                    (same fixed cooldown)
 ```
+
+Three states, no escalation. Every OPEN→HALF_OPEN transition uses the same fixed cooldown (60s default). No exponential backoff — if a provider is persistently broken, the circuit opens again immediately after the probe fails, which naturally limits retry rate to 1 attempt per 60s.
 
 ### 5.3 Error Classification
 
 | Error Type | Action |
 |-----------|--------|
-| HTTP 429 (Rate Limited) | Open breaker immediately (1 failure = open). Extract `Retry-After` header if present and use as cooldown. |
-| HTTP 5xx (Server Error) | Record failure, apply normal threshold logic. |
-| HTTP 401/403 (Auth) | Record failure, but also log warning about API key. |
-| Timeout | Record failure, apply normal threshold logic. |
-| Connection Error | Record failure, apply normal threshold logic. |
-| HTTP 4xx (other) | Record failure, apply normal threshold logic. |
+| HTTP 429 (Rate Limited) | Open breaker immediately (1 failure = open). Use `Retry-After` header as cooldown if present. |
+| HTTP 5xx (Server Error) | Record failure, open at 3 consecutive. |
+| HTTP 401/403 (Auth) | Record failure + log warning about API key. |
+| Timeout (per-provider) | Record failure, open at 3 consecutive. |
+| Connection Error (TCP) | Record failure, open at 3 consecutive. Also feeds network-down detection (see Section 5.5). |
+| HTTP 4xx (other) | Record failure, open at 3 consecutive. |
 | Result count < 2 | Do NOT record as breaker failure (quality issue, not availability). |
 
-### 5.4 Exponential Backoff
-
-```python
-def get_cooldown(provider_name: str) -> float:
-    """Cooldown duration increases with consecutive open cycles."""
-    entry = breakers[provider_name]
-    cooldown = base_cooldown * (backoff_multiplier ** entry.open_count)
-    return min(cooldown, max_cooldown)
-```
-
-- First open: 60s
-- Second open (probe failed): 120s
-- Third open: 240s
-- Fourth open: 480s
-- Fifth+ open: 600s (capped)
-
-`open_count` resets to 0 when the breaker transitions HALF_OPEN -> CLOSED (successful probe).
-
-### 5.5 429 with Retry-After
+### 5.4 429 with Retry-After
 
 ```python
 def handle_429(provider_name: str, headers: dict):
     retry_after = parse_retry_after(headers)  # seconds
     if retry_after and retry_after > 0:
-        # Use server-specified cooldown, clamped to [base_cooldown, max_cooldown]
-        cooldown = clamp(retry_after, base_cooldown, max_cooldown)
+        cooldown = clamp(retry_after, 10, 600)  # respect server, but cap at 10min
     else:
-        cooldown = get_cooldown(provider_name)
+        cooldown = DEFAULT_COOLDOWN  # 60s
     
     open_breaker(provider_name, cooldown=cooldown)
 ```
 
-### 5.6 Reset Timing
+### 5.5 Network-Down Short-Circuit
 
-- **OPEN -> HALF_OPEN**: After cooldown expires (checked on next routing call)
-- **HALF_OPEN -> CLOSED**: On first successful call
-- **HALF_OPEN -> OPEN**: On first failed call (with increased cooldown)
+If 2 consecutive providers fail with TCP connection errors (not HTTP errors — actual socket failures):
+
+```python
+consecutive_tcp_failures = 0
+
+for provider in candidates:
+    try:
+        result = await provider.search(...)
+    except ConnectionError:
+        consecutive_tcp_failures += 1
+        if consecutive_tcp_failures >= 2:
+            log("NETWORK_DOWN: 2 consecutive TCP failures, aborting search")
+            return FailureInfo(
+                failures=failures,
+                reason="network_unreachable",
+                suggestions=["Check your internet connection", "Check proxy configuration"]
+            )
+        continue
+    else:
+        consecutive_tcp_failures = 0  # reset on any non-TCP outcome
+```
+
+This prevents the user from waiting 10+ seconds while the system sequentially tries providers that all fail to connect.
+
+### 5.6 Reset
+
+- **OPEN → HALF_OPEN**: After cooldown expires (checked lazily on next routing call)
+- **HALF_OPEN → CLOSED**: On first successful search call
+- **HALF_OPEN → OPEN**: On first failed probe (same 60s cooldown again)
 - **Session restart**: All breaker state resets (in-memory only, not persisted)
+
+### 5.7 Why No Exponential Backoff
+
+Exponential backoff (60s → 120s → 240s → 600s) is designed for systems that make thousands of requests per minute. A CLI user makes ~5-20 searches per session. Fixed 60s cooldown means:
+- After a transient failure: provider is back in 60s.
+- After persistent failure: breaker opens → 60s → probe fails → opens again → 60s. Effective retry rate is 1/60s. With 4 providers, that's 1 probe per 60s — negligible load.
+- Exponential backoff would lock out a recovered provider for 10 minutes for no benefit.
+
+---
+
+## 5B. Latency Strategy
+
+### 5B.1 Design Goal
+
+A CLI user expects an answer within ~2-3 seconds. The maximum acceptable wait is 10 seconds. The latency strategy ensures the system never blocks longer than this, regardless of how many providers are configured or how slow they are.
+
+### 5B.2 Three Latency Controls
+
+| Control | Default | Purpose |
+|---------|---------|---------|
+| **Per-provider timeout** | 5s | Any single provider.search() call is cancelled after this. |
+| **Total search budget** | 10s | The entire failover chain (across all providers) must complete within this. |
+| **Hedge delay** | 200ms | When multiple providers share the same priority, start the second request after this delay. |
+
+### 5B.3 Per-Provider Timeout
+
+Every `provider.search()` call is wrapped in `asyncio.wait_for(timeout=per_provider_timeout)`:
+
+```python
+try:
+    result = await asyncio.wait_for(p.search(query, max_results, **kwargs), timeout=timeout)
+except asyncio.TimeoutError:
+    log(f"TIMEOUT {p.name}: exceeded {timeout:.1f}s")
+    circuit_breaker.record_failure(p.name, error="timeout")
+    failures.append({"provider": p.name, "error": f"timeout ({timeout:.1f}s)"})
+    continue
+```
+
+The timeout decreases as the budget is consumed: `timeout = min(per_provider_timeout, budget_remaining)`.
+
+Per-provider override is possible via the `timeout` field in provider config (e.g., `timeout: 15` for a slow LLM search provider).
+
+### 5B.4 Total Budget
+
+A monotonic deadline is set at the start of `execute_search()`:
+
+```python
+budget_deadline = time.monotonic() + TOTAL_BUDGET  # 10s
+```
+
+Before each provider attempt, check `time.monotonic() > budget_deadline`. If exceeded, return `best_so_far` or `FailureInfo`. This guarantees the user never waits more than `TOTAL_BUDGET` seconds regardless of how many providers fail slowly.
+
+### 5B.5 Hedged Requests
+
+When multiple providers share the same priority (e.g., Tavily and Serper both at priority 20), they are tried concurrently with staggered starts:
+
+```python
+async def _hedged_request(group: list[ScoredProvider], query, max_results, timeout, **kwargs):
+    """Start providers with staggered delays, return first good result."""
+    
+    async def attempt(provider, delay):
+        if delay > 0:
+            await asyncio.sleep(delay / 1000)  # hedge_delay is in ms
+        return await provider.search(query, max_results, **kwargs)
+    
+    # Start first immediately, second after hedge_delay, third after 2x hedge_delay, etc.
+    tasks = []
+    for i, scored in enumerate(group):
+        tasks.append(asyncio.create_task(
+            attempt(scored.provider, i * HEDGE_DELAY)
+        ))
+    
+    # Return first result that passes quality gate, cancel the rest
+    done, pending = await asyncio.wait(tasks, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+    
+    for task in pending:
+        task.cancel()
+    
+    # Evaluate completed results
+    for task in done:
+        result = task.result()
+        if result is not None and quality_gate_passes(result.results, query, result.answer):
+            return result
+    
+    # If first-completed didn't pass, wait for remaining
+    # (simplified: in practice, evaluate all done tasks)
+    return best_from(done) or None
+```
+
+**Why hedging instead of pure parallel**: Starting all requests simultaneously wastes quota. The first provider at a priority level usually responds within 200ms. The hedge delay means the second provider only fires if the first is slow — saving 1 API call in the common case while still protecting against tail latency.
+
+### 5B.6 Interaction with Other Components
+
+| Component | Latency Behavior |
+|-----------|-----------------|
+| Quality gate | Evaluated per-result, not part of timeout. Sub-microsecond. |
+| Circuit breaker | Timeout counts as a failure (opens after 3 consecutive). |
+| Quota | Charged only on actual response (not on timeout/cancel). |
+| Super mode | Has its own parallel strategy (asyncio.gather). Latency budget still applies as outer deadline. |
+| Network-down | TCP failures are fast (usually < 1s). The 2-failure short-circuit fires well within budget. |
+
+### 5B.7 Typical Latency Scenarios
+
+| Scenario | Expected Latency | Mechanism |
+|----------|-----------------|-----------|
+| First provider responds fast | ~1-2s | Direct return, no failover |
+| First provider slow, second fast | ~1.2s | Hedge fires at 200ms, second returns at ~1s |
+| First provider timeout | ~5s | Timeout fires, failover to second |
+| All providers slow | 10s (budget) | Budget exhausts, return best_so_far or error |
+| Network down | ~2-3s | Two TCP failures, short-circuit |
+| DDG-only config, DDG slow | ~5s | Single provider timeout, return whatever came back |
 
 ---
 
@@ -347,26 +466,28 @@ providers:
     type: ddg                     # REQUIRED. Adapter type: ddg|tavily|brave|gemini|searxng|json_api|llm_search
     enabled: true                 # Optional. Default: true. Set false to exclude entirely.
     priority: 10                  # Optional. Default: see type_defaults. Lower = tried first.
+    timeout: 5                    # Optional. Per-provider timeout in seconds. Default: 5.
     
     # Quota configuration (optional)
     quota:
       limit: 1000                 # Max calls per period. Required if quota block present.
       period: monthly             # daily | monthly | rolling. Default: monthly.
-      conserve: true              # Optional. Default: false. When true, defer if over-pacing (hysteresis: enter 1.5, exit 1.2).
     
     # Provider-specific fields
     api_key_env: TAVILY_API_KEY   # Env var name for API key (type-specific)
     endpoint: "https://..."       # For searxng, json_api, llm_search
     # ... (all existing provider-specific fields remain unchanged)
 
-# Optional: override global circuit breaker defaults per provider
+# Optional: override global circuit breaker defaults
 circuit_breaker:
-  base_cooldown: 60               # Default: 60
-  max_cooldown: 600               # Default: 600
-  backoff_multiplier: 2           # Default: 2
-  window_size: 5                  # Default: 5
   consecutive_threshold: 3        # Default: 3
-  rate_threshold: 0.6             # Default: 0.6
+  cooldown: 60                    # Default: 60 (seconds)
+
+# Optional: override latency budget
+latency:
+  per_provider_timeout: 5         # Default: 5 (seconds per provider attempt)
+  total_budget: 10                # Default: 10 (total seconds before giving up)
+  hedge_delay: 200                # Default: 200 (ms before starting hedged request)
 ```
 
 ### 6.2 Validation Rules
@@ -377,18 +498,20 @@ circuit_breaker:
 | `type` | string | Required. Must be a registered adapter type. |
 | `enabled` | bool | Optional. Default: true. |
 | `priority` | int | Optional. Range: 1-9999. Default: per type_defaults. |
+| `timeout` | int/float | Optional. Range: 1-30. Default: 5. Per-provider request timeout. |
 | `quota.limit` | int | Required if `quota` present. Must be > 0. |
 | `quota.period` | string | Optional. One of: `daily`, `monthly`, `rolling`. Default: `monthly`. |
-| `quota.conserve` | bool | Optional. Default: false. |
 | `api_key_env` | string | Optional. Must be a valid env var name `[A-Z0-9_]+`. |
-| `circuit_breaker.base_cooldown` | int | Optional. Range: 5-3600. Default: 60. |
-| `circuit_breaker.max_cooldown` | int | Optional. Range: 60-7200. Default: 600. |
-| `circuit_breaker.backoff_multiplier` | float | Optional. Range: 1.0-10.0. Default: 2.0. |
+| `circuit_breaker.consecutive_threshold` | int | Optional. Range: 1-10. Default: 3. |
+| `circuit_breaker.cooldown` | int | Optional. Range: 10-600. Default: 60. |
+| `latency.per_provider_timeout` | int/float | Optional. Range: 1-30. Default: 5. |
+| `latency.total_budget` | int/float | Optional. Range: 3-60. Default: 10. |
+| `latency.hedge_delay` | int | Optional. Range: 50-2000 (ms). Default: 200. |
 
 ### 6.3 Backward Compatibility
 
 The existing `tier` field is deprecated but still recognized. If present without a `quota` block:
-- `tier: free` → no quota, priority default 10
+- `tier: free` → no quota, priority default 90 (or 10 if free-only)
 - `tier: daily` → `quota: {period: daily, limit: <from env or 500>}`
 - `tier: paid` → `quota: {period: monthly, limit: <from env or null>}`
 
@@ -457,15 +580,15 @@ def get_tier(provider: ProviderConfig) -> int:
 
 When no `quota` block is specified, these defaults apply based on type:
 
-| Type | Default Quota | Default Conserve | Source Override |
-|------|---------------|------------------|----------------|
-| `ddg` | none (unlimited) | false | — |
-| `searxng` | none (unlimited) | false | — |
-| `tavily` | `{limit: 1000, period: monthly}` | true | `PIVOT_WEB_SEARCH_TAVILY_QUOTA` |
-| `brave` | `{limit: 2000, period: monthly}` | true | `PIVOT_WEB_SEARCH_BRAVE_QUOTA` |
-| `gemini` | `{limit: 500, period: daily}` | true | `PIVOT_WEB_SEARCH_GEMINI_QUOTA` |
-| `json_api` | none | false | User must configure |
-| `llm_search` | none | false | User must configure |
+| Type | Default Quota | Source Override |
+|------|---------------|----------------|
+| `ddg` | none (unlimited) | — |
+| `searxng` | none (unlimited) | — |
+| `tavily` | `{limit: 1000, period: monthly}` | `PIVOT_WEB_SEARCH_TAVILY_QUOTA` |
+| `brave` | `{limit: 2000, period: monthly}` | `PIVOT_WEB_SEARCH_BRAVE_QUOTA` |
+| `gemini` | `{limit: 500, period: daily}` | `PIVOT_WEB_SEARCH_GEMINI_QUOTA` |
+| `json_api` | none | User must configure |
+| `llm_search` | none | User must configure |
 
 Providers with no quota declaration and no limit are treated as unlimited. If they return 429, the circuit breaker handles protection (see Section 5.3).
 
@@ -526,28 +649,13 @@ This naturally distributes calls evenly among same-priority providers without ex
 
 When a same-priority provider fails quality check (< 2 results), the algorithm continues to the next entry in the sorted list. If `google-cse` returns 1 result, `serper` is tried next.
 
-### 8.4 Call Counter Persistence
+### 8.4 Call Counter: In-Memory Only
 
-The `call_counter` is stored alongside quota data in `~/.cache/pivot-web-search/quota.json`:
+The `call_counter` is **not** persisted to disk. It starts at 0 on each session start.
 
-```json
-{
-  "serper": {
-    "used": 45,
-    "limit": 100,
-    "period": "daily",
-    "call_counter": 127
-  },
-  "google-cse": {
-    "used": 43,
-    "limit": 100,
-    "period": "daily",
-    "call_counter": 125
-  }
-}
-```
+Why: Round-robin fairness across sessions is not valuable for a CLI tool. A user's session typically lasts 30-60 minutes. Persisting the counter adds file I/O on every search call for negligible benefit. If a provider was used more last session, that doesn't mean it should be deprioritized this session.
 
-Counter persists across sessions to maintain fair distribution.
+On session start, all providers at the same priority begin with `call_counter = 0`. The first request is dispatched to whichever sorts first (alphabetical, or insertion order). After that, round-robin naturally distributes.
 
 ---
 
@@ -642,16 +750,19 @@ Every routing decision produces a structured log line via `log()`:
 
 | Event | Format | Example |
 |-------|--------|---------|
-| Provider selected | `ROUTE {name} pri={pri} state={state}` | `ROUTE tavily pri=20 state=ACTIVE` |
+| Provider selected | `ROUTE {name} pri={pri}` | `ROUTE tavily pri=20` |
 | Provider skipped (exhausted) | `SKIP {name}: quota exhausted ({used}/{limit})` | `SKIP tavily: quota exhausted (1000/1000)` |
 | Provider skipped (breaker) | `SKIP {name}: circuit OPEN, {secs}s remaining` | `SKIP brave: circuit OPEN, 45s remaining` |
-| Provider deferred (conserve) | `DEFER {name}: pace_ratio={ratio:.2f}, conserving` | `DEFER tavily: pace_ratio=1.34, conserving` |
 | Search success | `SUCCESS {name}: {count} results` | `SUCCESS ddg: 5 results` |
 | Partial results | `PARTIAL {name}: {count}/{min} results, continuing` | `PARTIAL ddg: 1/2 results, continuing` |
 | Search failure | `FAIL {name}: {error}` | `FAIL brave: HTTP 429` |
+| Timeout | `TIMEOUT {name}: exceeded {secs}s` | `TIMEOUT gemini: exceeded 5.0s` |
+| Budget exhausted | `BUDGET_EXHAUSTED: {secs}s elapsed, returning best_so_far` | `BUDGET_EXHAUSTED: 10.0s elapsed, returning best_so_far` |
+| Hedge started | `HEDGE {name}: starting after {ms}ms delay` | `HEDGE serper: starting after 200ms delay` |
+| Network down | `NETWORK_DOWN: {n} consecutive TCP failures, aborting` | `NETWORK_DOWN: 2 consecutive TCP failures, aborting` |
 | Breaker state change | `BREAKER {name}: {old} -> {new} (reason)` | `BREAKER brave: CLOSED -> OPEN (3 consecutive failures)` |
 | Recovery probe | `PROBE {name}: forced HALF_OPEN (all-open fallback)` | `PROBE ddg: forced HALF_OPEN (all-open fallback)` |
-| Quota warning | `QUOTA {name}: {pct}% used, pace_ratio={ratio}` | `QUOTA tavily: 85% used, pace_ratio=1.7` |
+| Quota warning | `QUOTA_WARN {name}: {pct}% used ({used}/{limit})` | `QUOTA_WARN tavily: 85% used (850/1000)` |
 | Unexpected 429 | `WARNING: {name} returned 429 but has no quota configured` | (see 9.5) |
 
 ### 10.2 Per-Request Summary
@@ -681,36 +792,33 @@ When the user calls `WebSearchConfig(action="status")`:
 {
   "action": "status",
   "routing": {
-    "algorithm": "priority_with_quota_gates",
+    "algorithm": "priority_with_latency_budget",
     "total_providers": 4,
     "active": 3,
-    "conserved": 0,
     "exhausted": 1,
     "circuit_open": 0
+  },
+  "latency": {
+    "per_provider_timeout": 5,
+    "total_budget": 10,
+    "hedge_delay_ms": 200
   },
   "providers": [
     {
       "name": "ddg",
       "type": "ddg",
-      "priority": 10,
-      "effective_priority": 10,
+      "priority": 90,
       "state": "ACTIVE",
       "enabled": true,
       "available": true,
       "quota": null,
-      "breaker": {
-        "state": "CLOSED",
-        "recent_ok": 4,
-        "recent_total": 5,
-        "open_count": 0
-      },
+      "breaker": "CLOSED",
       "call_counter": 42
     },
     {
       "name": "tavily",
       "type": "tavily",
       "priority": 20,
-      "effective_priority": 20,
       "state": "ACTIVE",
       "enabled": true,
       "available": true,
@@ -719,23 +827,15 @@ When the user calls `WebSearchConfig(action="status")`:
         "limit": 1000,
         "period": "monthly",
         "usage_pct": 45.0,
-        "pace_ratio": 0.9,
-        "conserve": true,
         "source": "api"
       },
-      "breaker": {
-        "state": "CLOSED",
-        "recent_ok": 3,
-        "recent_total": 3,
-        "open_count": 0
-      },
+      "breaker": "CLOSED",
       "call_counter": 38
     },
     {
       "name": "brave",
       "type": "brave",
-      "priority": 30,
-      "effective_priority": 30,
+      "priority": 20,
       "state": "EXHAUSTED",
       "enabled": true,
       "available": false,
@@ -744,24 +844,16 @@ When the user calls `WebSearchConfig(action="status")`:
         "limit": 2000,
         "period": "rolling",
         "usage_pct": 100.0,
-        "pace_ratio": null,
-        "conserve": true,
         "resets_at": "2024-03-01T00:00:00Z",
         "source": "header"
       },
-      "breaker": {
-        "state": "CLOSED",
-        "recent_ok": 5,
-        "recent_total": 5,
-        "open_count": 0
-      },
+      "breaker": "CLOSED",
       "call_counter": 35
     },
     {
       "name": "gemini",
       "type": "gemini",
       "priority": 40,
-      "effective_priority": 40,
       "state": "ACTIVE",
       "enabled": true,
       "available": true,
@@ -770,29 +862,14 @@ When the user calls `WebSearchConfig(action="status")`:
         "limit": 500,
         "period": "daily",
         "usage_pct": 24.0,
-        "pace_ratio": 0.48,
-        "conserve": true,
         "resets_at": "PT midnight",
         "source": "config"
       },
-      "breaker": {
-        "state": "CLOSED",
-        "recent_ok": 2,
-        "recent_total": 2,
-        "open_count": 0
-      },
+      "breaker": "CLOSED",
       "call_counter": 15
     }
   ],
-  "circuit_breaker_config": {
-    "base_cooldown": 60,
-    "max_cooldown": 600,
-    "backoff_multiplier": 2,
-    "window_size": 5,
-    "consecutive_threshold": 3,
-    "rate_threshold": 0.6
-  },
-  "routing_order": ["ddg", "tavily", "gemini"],
+  "routing_order": ["tavily", "gemini", "ddg"],
   "config_sources": {
     "providers": {"source": "yaml", "path": "/path/to/config/providers.yaml"},
     "proxies": {"source": "yaml", "path": "/path/to/config/proxies.yaml"},
@@ -805,14 +882,11 @@ When the user calls `WebSearchConfig(action="status")`:
 
 | Field | Purpose |
 |-------|---------|
-| `routing.active` | Number of providers that will be tried before exhausted/open ones |
-| `routing.conserved` | Number deferred due to pacing (still available as fallback) |
-| `effective_priority` | Actual sort priority (includes +10000 for conserved) |
-| `state` | Human-readable: ACTIVE, CONSERVED, EXHAUSTED, CIRCUIT_OPEN, DISABLED |
-| `quota.pace_ratio` | Current consumption rate vs budget rate (>1.0 = over-pacing) |
+| `routing.active` | Number of providers available for routing (not exhausted, not circuit-open) |
+| `state` | Human-readable: ACTIVE, EXHAUSTED, CIRCUIT_OPEN, DISABLED |
+| `quota.usage_pct` | Percentage of quota consumed (for warning display) |
 | `routing_order` | The actual order providers would be tried right now (excluding exhausted/open) |
-| `breaker.open_count` | How many times this breaker has opened (affects backoff) |
-| `call_counter` | Total calls dispatched to this provider (for round-robin) |
+| `call_counter` | Total calls dispatched to this provider this session (for round-robin) |
 
 ---
 
@@ -824,12 +898,14 @@ When the user calls `WebSearchConfig(action="status")`:
 |-------------|----------|
 | `tier` field determines sort rank | `priority` field determines sort order directly |
 | Three-level tier rank (0, 1, 2) | Flat numeric priority (1-9999) |
-| Usage-pct as secondary metric | `call_counter` as tiebreaker |
-| Pacing pressure for paid tier only | Pacing for any provider with `conserve: true` |
-| High-water demotion (special case) | Replaced by generic conservation logic |
+| Usage-pct as secondary metric | `call_counter` as tiebreaker (in-memory) |
+| Pacing pressure for paid tier only | Simple exhaustion gate (used >= limit → excluded) |
+| High-water demotion (special case) | Removed — no invisible throttling |
 | News demotion for DDG (special case) | Removed (user controls priority) |
-| Fixed 120s cooldown | Exponential backoff 60s-600s |
+| Fixed 120s cooldown | Fixed 60s cooldown + Retry-After respect |
 | Single failure threshold | Per-error-type handling (429 = immediate open) |
+| No timeouts | Per-provider 5s timeout + 10s total budget |
+| Sequential-only failover | Hedged requests for same-priority providers |
 
 ### 12.2 Backward Compatibility
 
@@ -838,18 +914,22 @@ Existing `config/providers.yaml` files continue to work:
 - `tier` field is mapped to `quota` defaults if no `quota` block present
 - No configuration changes required for basic operation
 - Users can incrementally adopt `quota` blocks
+- The `conserve` field is deprecated and ignored (no-op)
 
 ### 12.3 Implementation Order
 
 1. Add `quota` schema to provider config parsing (backward-compat with `tier`)
-2. Add `call_counter` to quota.json persistence
-3. Implement new `select_providers()` with conservation logic
-4. Replace `route_providers()` internals (same function signature)
-5. Upgrade circuit breaker with exponential backoff + 429 handling
-6. Update `WebSearchConfig` status output
-7. Update logging to match new event format
-8. Remove `TIER_RANK`, `HIGH_WATER_*`, `NEWS_DDG_*` constants
-9. Update tests
+2. Replace `route_providers()` with `select_providers()` + priority sort
+3. Add `call_counter` (in-memory only, no persistence)
+4. Add per-provider timeout wrapping
+5. Add total budget deadline
+6. Implement hedged requests for same-priority groups
+7. Simplify circuit breaker (remove backoff, add network-down detection)
+8. Add quality gate with keyword overlap
+9. Update `WebSearchConfig` status output
+10. Update logging to new event format
+11. Remove `TIER_RANK`, `HIGH_WATER_*`, `NEWS_DDG_*`, `CONSERVE_*` constants
+12. Update tests
 
 ---
 
@@ -875,7 +955,7 @@ providers:
 
 Routing: Tavily/Brave round-robin (both priority 20), DDG as fallback (priority 90). Type defaults provide quota limits.
 
-### 13.2 Power User (Explicit Quotas, Conservation, Multiple Same-Priority)
+### 13.2 Power User (Explicit Quotas, Multiple Same-Priority)
 
 ```yaml
 providers:
@@ -886,10 +966,10 @@ providers:
     api_key_env: PERPLEXITY_API_KEY
     api_format: chat_completions
     model: sonar-pro
+    timeout: 15           # LLM search is slower
     quota:
       limit: 50
       period: daily
-      conserve: true
 
   - name: tavily
     type: tavily
@@ -898,7 +978,6 @@ providers:
     quota:
       limit: 1000
       period: monthly
-      conserve: true
 
   - name: serper
     type: json_api
@@ -908,7 +987,6 @@ providers:
     quota:
       limit: 2500
       period: monthly
-      conserve: true
 
   - name: searxng-local
     type: searxng
@@ -920,8 +998,7 @@ providers:
     # No explicit priority → default 90 (tier: fallback)
 
 circuit_breaker:
-  base_cooldown: 30       # Faster recovery for local dev
-  max_cooldown: 300
+  cooldown: 30              # Faster recovery for local dev
 ```
 
 Routing: sonar-pro(10) → tavily/serper(20, round-robin) → searxng(30) → ddg(90).
@@ -937,7 +1014,6 @@ providers:
     quota:
       limit: 1000
       period: monthly
-      conserve: false     # No point conserving with no fallback
 ```
 
 Routing behavior: always uses Tavily. Returns whatever Tavily returns (even 0 results as empty, or error as FailureInfo). Never errors with "all providers failed" if Tavily returned partial results.
@@ -954,7 +1030,6 @@ providers:
     quota:
       limit: 1000
       period: monthly
-      conserve: true
 
   - name: brave
     type: brave
@@ -963,7 +1038,6 @@ providers:
     quota:
       limit: 2000
       period: monthly
-      conserve: true
 
   - name: gemini
     type: gemini
@@ -972,14 +1046,13 @@ providers:
     quota:
       limit: 500
       period: daily
-      conserve: true
 
   - name: ddg
     type: ddg
     priority: 20          # Same as others — participates in round-robin
 ```
 
-Routing: All four providers at priority 20. `call_counter` distributes evenly. When any provider's `conserve` triggers (pace_ratio > 1.5), it's deferred to priority 10020 — others continue round-robin. DDG never exhausts, so it picks up slack when paid providers conserve.
+Routing: All four providers at priority 20. `call_counter` distributes evenly via round-robin. Hedged requests mean that if the first provider in the group is slow (>200ms), a second fires concurrently. When any provider hits its quota limit, it's excluded — others continue round-robin. DDG never exhausts, so it naturally absorbs load when paid providers are excluded.
 
 ### 13.5 v1 Migration (Explicit Priorities Unchanged)
 
@@ -1020,7 +1093,8 @@ class ProviderConfig:
     name: str
     type: str
     enabled: bool = True
-    priority: int = 50
+    priority: int | None = None   # None = use smart defaults
+    timeout: float = 5.0          # per-provider timeout in seconds
     api_key_env: str | None = None
     quota: QuotaConfig | None = None
     # ... other provider-specific fields in self.config dict
@@ -1029,7 +1103,6 @@ class ProviderConfig:
 class QuotaConfig:
     limit: int
     period: Literal["daily", "monthly", "rolling"] = "monthly"
-    conserve: bool = False
 ```
 
 ### 14.2 Scored Provider (Internal to Router)
@@ -1039,24 +1112,21 @@ class QuotaConfig:
 class ScoredProvider:
     provider: SearchProvider
     sort_key: tuple[int, int]      # (effective_priority, call_counter)
-    state: Literal["ACTIVE", "CONSERVED"]
     breaker_state: BreakerState
 ```
 
-### 14.3 Circuit Breaker Entry (Enhanced)
+### 14.3 Circuit Breaker Entry
 
 ```python
 @dataclass
 class BreakerEntry:
     state: BreakerState = BreakerState.CLOSED
-    outcomes: deque = field(default_factory=lambda: deque(maxlen=5))
     consecutive_failures: int = 0
     opened_at: float | None = None
-    open_count: int = 0            # NEW: tracks consecutive open cycles for backoff
-    current_cooldown: float = 60.0  # NEW: current cooldown duration
+    cooldown: float = 60.0         # current cooldown (60s default, or Retry-After)
 ```
 
-### 14.4 Quota File Format (Enhanced)
+### 14.4 Quota File Format
 
 ```json
 {
@@ -1066,18 +1136,14 @@ class BreakerEntry:
     "period": "monthly",
     "month": "2024-02",
     "source": "api",
-    "last_synced": "2024-02-15T10:30:00Z",
-    "call_counter": 38,
-    "conserve": true
+    "last_synced": "2024-02-15T10:30:00Z"
   },
   "gemini": {
     "used": 120,
     "limit": 500,
     "period": "daily",
     "day": "2024-02-15",
-    "source": "config",
-    "call_counter": 15,
-    "conserve": true
+    "source": "config"
   },
   "brave": {
     "used": 2000,
@@ -1085,9 +1151,7 @@ class BreakerEntry:
     "period": "rolling",
     "reset_at": "2024-03-01T00:00:00Z",
     "last_synced": "2024-02-15T10:30:00Z",
-    "source": "header",
-    "call_counter": 35,
-    "conserve": true
+    "source": "header"
   }
 }
 ```
@@ -1100,11 +1164,14 @@ class BreakerEntry:
 
 | Test Area | Cases |
 |-----------|-------|
-| Sort order | Priority ordering, call_counter tiebreak, conservation demotion |
+| Sort order | Priority ordering, call_counter tiebreak |
 | Smart defaults | Tier assignment, free-only collapse, explicit priority override, `premium` flag |
-| Quota states | ACTIVE/CONSERVED/EXHAUSTED transitions, pace_ratio edge cases |
-| Circuit breaker | Open/close/half-open transitions, exponential backoff, 429 handling |
-| Multi-instance | Round-robin fairness, call_counter persistence |
+| Quota states | ACTIVE/EXHAUSTED transitions, period reset, warning threshold |
+| Circuit breaker | Open/close/half-open transitions, fixed cooldown, 429 immediate-open, Retry-After |
+| Latency | Per-provider timeout cancellation, total budget deadline, hedged request mechanics |
+| Network-down | TCP failure counting, short-circuit after 2 consecutive |
+| Multi-instance | Round-robin fairness (in-memory counter) |
+| Quality gate | Keyword overlap, answer-field pass, count threshold |
 | Edge cases | Single provider, all exhausted, no quota declaration + 429 |
 | Backward compat | `tier` field mapping to quota defaults, v1 explicit priorities unchanged |
 | Config validation | Invalid priority range, missing required fields, duplicate names |
@@ -1114,9 +1181,10 @@ class BreakerEntry:
 
 | Test Area | Cases |
 |-----------|-------|
-| Full failover | DDG rate-limit -> Tavily success |
-| Quality gate | Provider returns 1 result -> failover to next |
-| Conservation | Pace ratio > 1.0 -> provider deferred but reachable |
+| Full failover | DDG rate-limit → Tavily success |
+| Quality gate | Provider returns 1 result → failover to next |
+| Timeout handling | Slow provider times out → next provider wins |
+| Hedging | Same-priority providers, first slow → hedge fires |
 | Recovery | All-open fallback finds closest-to-recovery provider |
 
 ---
@@ -1157,7 +1225,7 @@ The `status` response includes a `notes` array with actionable suggestions:
 | Paid provider priority > DDG priority | `"Provider 'tavily' (priority=95) will be tried AFTER 'ddg' (priority=10). Likely unintentional."` |
 | Explicit priority higher than same-tier default | `"Explicit 'tavily' (50) will be tried after auto-assigned 'brave' (20). Set brave's priority explicitly if this is unintended."` |
 | Provider circuit-broken | `"'brave' is circuit-broken (reopens in 45s). Routing to next available."` |
-| Provider approaching quota | `"'tavily' at 85% quota (pace_ratio=1.3). Conservation active — deferred to fallback."` |
+| Provider approaching quota | `"'tavily' at 85% quota (850/1000 monthly). Consider adding another provider."` |
 | No quota declared but getting 429s | `"'perplexity' returned 429 but has no quota configured. Consider adding quota declaration."` |
 | Free-only collapse changed on reload | `"Routing order changed: DDG demoted from primary (10) to fallback (90) — new paid provider detected."` |
 
@@ -1210,7 +1278,7 @@ Based on analysis of LiteLLM, Portkey, OpenRouter, Cloudflare AI Gateway, and Bi
 | Zero-config + progressive disclosure | Bifrost, OpenRouter | Works with DDG alone; adding keys activates providers automatically |
 | Quality threshold failover | **Unique to us** | No other search router does quality-based continuation (< 2 results) |
 
-**Our differentiator**: We are the only search routing system that combines quality-based failover (result count threshold), quota-aware conservation, and heterogeneous provider support. LLM gateways route between providers serving the same model; we route between fundamentally different search backends.
+**Our differentiator**: We are the only search routing system that combines quality-based failover (keyword overlap + result count), latency-budgeted hedging, and heterogeneous provider support. LLM gateways route between providers serving the same model; we route between fundamentally different search backends.
 
 ---
 
@@ -1219,15 +1287,19 @@ Based on analysis of LiteLLM, Portkey, OpenRouter, Cloudflare AI Gateway, and Bi
 1. **Kill tiers as routing rank**: No more `free/daily/paid` tier_rank system. `effective_priority` is the sole sort key.
 2. **Smart defaults by quality tier**: Premium=10, Paid=20, Self-hosted=30, Free=90. Only when no explicit priority.
 3. **Free-only collapse**: If DDG is the only provider, it gets priority 10 (not 90).
-4. **Kill high-water demotion**: Replaced by generic `conserve` flag + pace_ratio.
+4. **Kill invisible throttling**: No pace_ratio, no conservation, no hysteresis. Exhaustion at 100% is the only quota gate.
 5. **Kill news demotion**: DDG priority is user-configured. Special-casing removed.
-6. **Add call_counter**: Enables true round-robin at same priority without separate tracking.
-7. **Add exponential backoff**: Prevents hammering a consistently-failing provider (60s → 600s).
+6. **Add call_counter (in-memory)**: Enables true round-robin at same priority. Not persisted.
+7. **Fixed 60s circuit breaker cooldown**: No exponential backoff. Retry-After from 429s is respected.
 8. **429 = immediate open**: Rate limits are treated as breaker events, not regular failures.
-9. **conserve is opt-in**: Providers without `conserve: true` are never deferred, only exhausted.
-10. **Single provider = best effort**: Never error if we got *any* results.
-11. **Status shows routing_order + priority_source**: User can verify computed behavior matches intent.
-12. **`premium` flag for json_api**: Promotes custom endpoints to tier 1 when warranted.
+9. **Per-provider timeout (5s)**: No single provider can block the user for more than 5 seconds.
+10. **Total search budget (10s)**: The entire failover chain is capped regardless of provider count.
+11. **Hedged requests**: Same-priority providers fire concurrently with staggered starts (200ms delay).
+12. **Network-down short-circuit**: 2 consecutive TCP failures = stop immediately, don't waste time.
+13. **Single provider = best effort**: Never error if we got *any* results.
+14. **Quality gate with keyword overlap**: Catches irrelevant results, not just low count.
+15. **Status shows routing_order + priority_source**: User can verify computed behavior matches intent.
+16. **`premium` flag for json_api**: Promotes custom endpoints to tier 1 when warranted.
 
 ---
 
@@ -1320,8 +1392,8 @@ def _extract_significant_terms(query: str) -> list[str]:
 |-----------|---------------------|
 | Circuit breaker | Quality failures do NOT open the breaker (not a transport error) |
 | call_counter | YES increment — provider was called, quota consumed |
-| Conservation | No leniency — conserved provider returning garbage still wastes user time |
-| Logging | `QUALITY_FAIL {provider}: score={score}, reason={reason}` |
+| Timeout | Quality gate runs after response, not subject to timeout |
+| Logging | `QUALITY_FAIL {provider}: reason={reason}` |
 | best_so_far | If gate fails but results > 0, compare with best_so_far by count |
 
 ### 19.6 Performance
@@ -1331,21 +1403,9 @@ def _extract_significant_terms(query: str) -> list[str]:
 - Keyword check: substring search, sub-microsecond for typical result sets
 - Zero network calls, zero allocations beyond a few string comparisons
 
-### 19.7 Future Extensions (Not Now)
-
-If the minimal gate proves insufficient in production:
-
-| Extension | Trigger | Complexity |
-|-----------|---------|-----------|
-| Rolling baseline per provider | Replace static "< 2" with EMA-based adaptive minimum | Medium |
-| BM25 relevance scoring | Weighted term frequency matching on snippets | Medium |
-| RRF scoring for super mode | `1/(k + rank)` fusion for cross-provider ranking | Low (already partially in dedup_and_rank) |
-
-These are observability-driven: only implement after collecting data on false negatives from the minimal gate.
-
 ---
 
-### 19.8 SearXNG Scoring Reference (for Super Mode)
+### 19.7 SearXNG Scoring Reference (for Super Mode)
 
 For informing our existing `dedup_and_rank()` in super mode, SearXNG's formula is relevant:
 
@@ -1354,22 +1414,20 @@ For informing our existing `dedup_and_rank()` in super mode, SearXNG's formula i
 # Our equivalent in dedup_and_rank: rank by provider_count (number of providers that returned the URL)
 ```
 
-Our super mode already uses cross-provider agreement as a ranking signal. The SearXNG pattern validates this approach. A potential enhancement: adopt **Reciprocal Rank Fusion** (`1/(k + rank)` with k=60) for better rank dampening, which is the 2024-2025 standard in hybrid search (Elasticsearch, Azure AI Search, LangChain).
+Our super mode already uses cross-provider agreement as a ranking signal. The SearXNG pattern validates this approach. We adopt **Reciprocal Rank Fusion** (`1/(k + rank)` with k=60) for better rank dampening — the 2024-2025 standard in hybrid search (Elasticsearch, Azure AI Search, LangChain).
 
 ---
 
 ## 20. Implementation Phasing
 
-| Phase | Scope | Risk |
-|-------|-------|------|
-| **Phase 1 (v2.0)** | Replace sort key, add call_counter, smart defaults, daily pacing, enhanced quality gate | Low — behavioral improvement, backward compatible |
-| **Phase 2** | Exponential backoff, 429 immediate-open, conservation hysteresis | Medium — resilience |
-| **Phase 3** | Enhanced status output, diagnostic notes, tier deprecation warnings | Low — UX polish |
+This is a single-phase implementation. All features described in this document ship together. No phased rollout — the design is complete and self-consistent.
 
 ### 20.1 Implementation Notes
 
 Key concerns identified during feasibility review:
-- **call_counter persistence**: Best-effort in-memory, flush to quota.json periodically. Eventual consistency is acceptable for round-robin fairness.
-- **Hysteresis state**: Store `_conserved` flag in module-level dict keyed by provider name (survives config reload).
+- **call_counter**: In-memory only. Starts at 0 on session start. No persistence needed.
 - **Hot reload + routing**: Use copy-on-write pattern (swap atomic reference) to avoid mid-flight invalidation.
-- **`is_news` parameter**: Keep in `route_providers()` signature but ignore (backward compat). Remove in v3.
+- **Hedged requests**: Use `asyncio.create_task` + `asyncio.wait(return_when=FIRST_COMPLETED)`. Cancel pending on success.
+- **Per-provider timeout**: `asyncio.wait_for` wrapper. Provider-specific override via `timeout` field.
+- **`is_news` parameter**: Remove from router. Smart defaults handle news detection at a higher layer.
+- **Backward compat**: `tier` and `conserve` fields are parsed but ignored. No errors on unknown fields.
