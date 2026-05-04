@@ -1155,9 +1155,11 @@ The `status` response includes a `notes` array with actionable suggestions:
 |-----------|------|
 | All providers are free-tier only | `"Only free providers configured. Add a paid provider (Tavily/Brave) for better result quality."` |
 | Paid provider priority > DDG priority | `"Provider 'tavily' (priority=95) will be tried AFTER 'ddg' (priority=10). Likely unintentional."` |
+| Explicit priority higher than same-tier default | `"Explicit 'tavily' (50) will be tried after auto-assigned 'brave' (20). Set brave's priority explicitly if this is unintended."` |
 | Provider circuit-broken | `"'brave' is circuit-broken (reopens in 45s). Routing to next available."` |
 | Provider approaching quota | `"'tavily' at 85% quota (pace_ratio=1.3). Conservation active — deferred to fallback."` |
 | No quota declared but getting 429s | `"'perplexity' returned 429 but has no quota configured. Consider adding quota declaration."` |
+| Free-only collapse changed on reload | `"Routing order changed: DDG demoted from primary (10) to fallback (90) — new paid provider detected."` |
 
 ### 16.4 Priority Source Transparency
 
@@ -1226,3 +1228,37 @@ Based on analysis of LiteLLM, Portkey, OpenRouter, Cloudflare AI Gateway, and Bi
 10. **Single provider = best effort**: Never error if we got *any* results.
 11. **Status shows routing_order + priority_source**: User can verify computed behavior matches intent.
 12. **`premium` flag for json_api**: Promotes custom endpoints to tier 1 when warranted.
+
+---
+
+## 19. Future Enhancements (Not Blocking v2)
+
+### 19.1 Advanced Quality Gate (Beyond Result Count)
+
+The current quality gate (`< 2 results → failover`) is simple and effective. Future improvements based on meta-search research (SearXNG scoring, search aggregation literature):
+
+| Signal | Description | When to Trigger |
+|--------|-------------|----------------|
+| Domain diversity | > 80% results from single domain | Indicates navigational/broken response |
+| Query-term overlap | < 50% of results contain any query term | Suggests irrelevant response |
+| Snippet quality | Missing or < 20 char snippets on majority | Degraded metadata response |
+| Cross-provider consensus | Only penalize if peers returned more | Prevents false positives on obscure queries |
+| Rolling baseline | Per-provider historical average | Replace static "< 2" with adaptive minimum |
+
+These are additive — the current `< 2 results` gate remains as the primary, simple check.
+
+### 19.2 Implementation Phasing
+
+| Phase | Scope | Risk |
+|-------|-------|------|
+| **Phase 1 (v2.0)** | Replace sort key, add call_counter, smart defaults, daily pacing | Low — behavioral improvement, backward compatible |
+| **Phase 2** | Exponential backoff, 429 immediate-open, conservation hysteresis | Medium — resilience |
+| **Phase 3** | Enhanced status output, diagnostic notes, tier deprecation warnings | Low — UX polish |
+
+### 19.3 Implementation Notes
+
+Key concerns identified during feasibility review:
+- **call_counter persistence**: Best-effort in-memory, flush to quota.json periodically. Eventual consistency is acceptable for round-robin fairness.
+- **Hysteresis state**: Store `_conserved` flag in module-level dict keyed by provider name (survives config reload).
+- **Hot reload + routing**: Use copy-on-write pattern (swap atomic reference) to avoid mid-flight invalidation.
+- **`is_news` parameter**: Keep in `route_providers()` signature but ignore (backward compat). Remove in v3.
