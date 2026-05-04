@@ -387,10 +387,14 @@ Per-provider override is possible via the `timeout` field in provider config (e.
 A monotonic deadline is set at the start of `execute_search()`:
 
 ```python
-budget_deadline = time.monotonic() + TOTAL_BUDGET  # 10s
+first_timeout = candidates[0].provider.timeout if candidates else PER_PROVIDER_TIMEOUT
+effective_budget = max(TOTAL_BUDGET, first_timeout + 2)  # extend for slow primary
+budget_deadline = time.monotonic() + effective_budget
 ```
 
-Before each provider attempt, check `time.monotonic() > budget_deadline`. If exceeded, return `best_so_far` or `FailureInfo`. This guarantees the user never waits more than `TOTAL_BUDGET` seconds regardless of how many providers fail slowly.
+Before each provider attempt, check `time.monotonic() > budget_deadline`. If exceeded, return `best_so_far` or `FailureInfo`.
+
+**Budget extension rule**: If the first (highest-priority) candidate has a per-provider timeout greater than `TOTAL_BUDGET`, the budget expands to `timeout + 2s`. This accommodates the "unlimited LLM" profile where a user explicitly chose a slow provider as their primary. The +2s leaves room for one fast fallback attempt if the primary times out. The extension only applies to the first candidate's timeout — it doesn't cascade.
 
 ### 5B.5 Hedged Requests
 
@@ -447,10 +451,12 @@ async def _hedged_request(group: list[ScoredProvider], query, max_results, timeo
 |----------|-----------------|-----------|
 | First provider responds fast | ~1-2s | Direct return, no failover |
 | First provider slow, second fast | ~1.2s | Hedge fires at 200ms, second returns at ~1s |
-| First provider timeout | ~5s | Timeout fires, failover to second |
+| First provider timeout (5s default) | ~5s | Timeout fires, failover to second |
 | All providers slow | 10s (budget) | Budget exhausts, return best_so_far or error |
 | Network down | ~2-3s | Two TCP failures, short-circuit |
 | DDG-only config, DDG slow | ~5s | Single provider timeout, return whatever came back |
+| Unlimited LLM (timeout=30) succeeds | ~15-25s | Budget extended to 32s, LLM returns |
+| Unlimited LLM (timeout=30) fails | ~32s | LLM times out at 30s, DDG fallback at ~31s |
 
 ---
 
@@ -610,11 +616,47 @@ For `json_api` adapters wrapping premium LLM-powered search (Perplexity, You.com
 | Profile | Config | Computed Priorities | Routing Order |
 |---------|--------|--------------------:|---------------|
 | Minimalist (DDG only) | `ddg` | ddg=10 | DDG (sole provider) |
-| Standard paid | `tavily + brave + ddg` | tavily=20, brave=20, ddg=90 | Tavily/Brave (round-robin) → DDG |
+| Standard paid | `tavily + brave + ddg` | tavily=20, brave=20, ddg=90 | Tavily/Brave (hedged) → DDG |
 | Self-hoster | `searxng + ddg` | searxng=30, ddg=90 | SearXNG → DDG |
-| Premium | `llm_search + tavily + ddg` | llm=10, tavily=20, ddg=90 | Premium → Tavily → DDG |
+| Premium (limited) | `llm_search + tavily + ddg` | llm=10, tavily=20, ddg=90 | Premium → Tavily → DDG |
 | Enterprise | `json_api(premium) + gemini + ddg` | json=10, gemini=20, ddg=90 | Custom → Gemini → DDG |
 | Budget maximizer | `tavily(pri=20) + brave(pri=20) + ddg(pri=20)` | all=20 (explicit) | Round-robin all three |
+| Unlimited LLM | `llm_search(no quota) + ddg` | llm=10, ddg=90 | LLM search (timeout=30) → DDG |
+
+### 7.7 The "Unlimited LLM" Profile
+
+A user with free/unlimited access to an LLM search provider (enterprise AI Core, free Perplexity tier, etc.). This profile is unique:
+
+- **Highest quality provider + no quota concern** — every request should go to the LLM provider.
+- **But slowest response time** — LLM search typically takes 10-30s.
+- The user accepts the latency tradeoff for quality.
+
+Config:
+```yaml
+providers:
+  - name: ai-core-search
+    type: llm_search
+    endpoint: "https://ai-core.internal/v2/chat/completions"
+    api_key_env: AI_CORE_TOKEN
+    model: gpt-4o-search
+    timeout: 30             # LLM search is slow — explicit override
+    # No quota block → unlimited
+
+  - name: ddg
+    type: ddg
+    # DDG as fallback only when LLM search fails
+```
+
+**Latency budget interaction**: When the highest-priority provider has `timeout > total_budget`, the budget is extended to accommodate it. Specifically:
+
+```python
+effective_budget = max(TOTAL_BUDGET, first_candidate.timeout + 2)
+# If LLM search has timeout=30, budget becomes 32s for this request
+```
+
+This ensures the system doesn't prematurely kill a legitimately slow provider that the user explicitly chose as their primary. The +2s allows time for DDG fallback if the LLM provider times out.
+
+**Why this is safe**: The user declared this provider as primary by giving it the highest priority. They are explicitly opting into the latency. The total budget is a protection against *unintended* waiting (sequential failover through many providers), not against a single provider the user chose.
 
 ### 7.7 Why This Fixes the v1 Tier Problem
 
