@@ -1231,31 +1231,142 @@ Based on analysis of LiteLLM, Portkey, OpenRouter, Cloudflare AI Gateway, and Bi
 
 ---
 
-## 19. Future Enhancements (Not Blocking v2)
+## 19. Quality Gate Design
 
-### 19.1 Advanced Quality Gate (Beyond Result Count)
+### 19.1 Current Gate (v1)
 
-The current quality gate (`< 2 results → failover`) is simple and effective. Future improvements based on meta-search research (SearXNG scoring, search aggregation literature):
+```python
+min_acceptable = min(2, max_results)
+if len(results) < min_acceptable:
+    continue_to_next_provider()
+```
 
-| Signal | Description | When to Trigger |
-|--------|-------------|----------------|
-| Domain diversity | > 80% results from single domain | Indicates navigational/broken response |
-| Query-term overlap | < 50% of results contain any query term | Suggests irrelevant response |
-| Snippet quality | Missing or < 20 char snippets on majority | Degraded metadata response |
-| Cross-provider consensus | Only penalize if peers returned more | Prevents false positives on obscure queries |
-| Rolling baseline | Per-provider historical average | Replace static "< 2" with adaptive minimum |
+Simple, zero false positives, but misses cases where a provider returns 5 irrelevant results.
 
-These are additive — the current `< 2 results` gate remains as the primary, simple check.
+### 19.2 Enhanced Quality Gate (v2)
 
-### 19.2 Implementation Phasing
+Based on analysis of 7 real failure scenarios and SearXNG/meta-search research:
+
+**Signals evaluated and their verdict:**
+
+| Signal | Include? | Rationale |
+|--------|----------|-----------|
+| Result count (post-dedup) | **Yes** (existing) | Core gate, proven reliable |
+| Answer field presence | **Yes** (new) | LLM providers return answers without traditional results — valid response |
+| Keyword overlap | **Yes** (new) | Catches irrelevant results (DDG returning "Debussy" for "Claude Code hooks") |
+| Domain diversity | **No** | Too many false positives (StackOverflow for code queries, NIH for medical) |
+| Snippet fill rate | **No** | Format difference, not quality — json_api/SearXNG may legitimately omit snippets |
+| Cross-provider consensus | **No** | Requires extra network calls; incompatible with failover-by-design |
+| Freshness | **No** | Provider capability issue, not quality gate — handled by routing (recency filters) |
+
+### 19.3 The Minimum Viable Quality Gate
+
+```python
+def quality_gate_passes(results: list[dict], query: str, answer: str | None) -> bool:
+    """Decide whether results are acceptable or failover should continue.
+    
+    Returns True = use these results. False = try next provider.
+    """
+    # Gate 0: LLM answer is a valid response regardless of result count
+    if answer and len(answer) > 20:
+        return True
+    
+    # Gate 1: Post-dedup count (existing behavior)
+    unique_urls = {r.get("url") for r in results if r.get("url")}
+    if len(unique_urls) < 2:
+        return False
+    
+    # Gate 2: Minimal keyword overlap (new)
+    # At least 1 query term must appear in at least 1 result title/snippet
+    query_terms = _extract_significant_terms(query)
+    if query_terms:
+        for r in results:
+            text = (r.get("title", "") + " " + r.get("snippet", "")).lower()
+            if any(term in text for term in query_terms):
+                return True  # found at least one relevant result
+        return False  # zero results match any query term
+    
+    # No significant query terms extracted (e.g., single stopword) — pass
+    return True
+
+
+def _extract_significant_terms(query: str) -> list[str]:
+    """Extract non-stopword terms from query, longest first.
+    
+    Returns lowercase terms. Skips common stopwords and single-char terms.
+    """
+    STOPWORDS = {"the", "a", "an", "is", "are", "was", "were", "in", "on",
+                 "at", "to", "for", "of", "with", "and", "or", "not", "how",
+                 "what", "when", "where", "why", "who", "which", "do", "does"}
+    terms = [w.lower() for w in query.split() if len(w) > 1 and w.lower() not in STOPWORDS]
+    return sorted(terms, key=len, reverse=True)[:5]  # top 5 longest terms
+```
+
+### 19.4 Scenario Validation
+
+| Scenario | Gate Result | Correct? |
+|----------|:-----------:|:--------:|
+| DDG returns 5 StackOverflow results for "python asyncio timeout" | PASS (keyword "asyncio"/"timeout" in titles) | Yes |
+| json_api returns 5 results with empty snippets | PASS (count >= 2, keyword check on titles) | Yes |
+| All providers return 0-2 for obscure query | FAIL → failover exhausts naturally → best_so_far returned | Yes |
+| DDG returns "Debussy" results for "Claude Code hooks" | FAIL (no result contains "Claude", "Code", "hooks") | Yes |
+| Time-sensitive query with stale results | PASS (routing layer handles recency, not quality gate) | Yes |
+| 10 results but 8 duplicate URLs → 2 unique | FAIL (post-dedup count < 2) | Yes |
+| Perplexity returns answer + 0 results | PASS (answer field present) | Yes |
+
+### 19.5 Interaction with Routing System
+
+| Component | Quality Gate Behavior |
+|-----------|---------------------|
+| Circuit breaker | Quality failures do NOT open the breaker (not a transport error) |
+| call_counter | YES increment — provider was called, quota consumed |
+| Conservation | No leniency — conserved provider returning garbage still wastes user time |
+| Logging | `QUALITY_FAIL {provider}: score={score}, reason={reason}` |
+| best_so_far | If gate fails but results > 0, compare with best_so_far by count |
+
+### 19.6 Performance
+
+- O(n) over results (typically 5-10 items)
+- `_extract_significant_terms`: O(|query|), cached per-request
+- Keyword check: substring search, sub-microsecond for typical result sets
+- Zero network calls, zero allocations beyond a few string comparisons
+
+### 19.7 Future Extensions (Not Now)
+
+If the minimal gate proves insufficient in production:
+
+| Extension | Trigger | Complexity |
+|-----------|---------|-----------|
+| Rolling baseline per provider | Replace static "< 2" with EMA-based adaptive minimum | Medium |
+| BM25 relevance scoring | Weighted term frequency matching on snippets | Medium |
+| RRF scoring for super mode | `1/(k + rank)` fusion for cross-provider ranking | Low (already partially in dedup_and_rank) |
+
+These are observability-driven: only implement after collecting data on false negatives from the minimal gate.
+
+---
+
+### 19.8 SearXNG Scoring Reference (for Super Mode)
+
+For informing our existing `dedup_and_rank()` in super mode, SearXNG's formula is relevant:
+
+```python
+# SearXNG: score = sum((occurrences * weight) / position) for each engine position
+# Our equivalent in dedup_and_rank: rank by provider_count (number of providers that returned the URL)
+```
+
+Our super mode already uses cross-provider agreement as a ranking signal. The SearXNG pattern validates this approach. A potential enhancement: adopt **Reciprocal Rank Fusion** (`1/(k + rank)` with k=60) for better rank dampening, which is the 2024-2025 standard in hybrid search (Elasticsearch, Azure AI Search, LangChain).
+
+---
+
+## 20. Implementation Phasing
 
 | Phase | Scope | Risk |
 |-------|-------|------|
-| **Phase 1 (v2.0)** | Replace sort key, add call_counter, smart defaults, daily pacing | Low — behavioral improvement, backward compatible |
+| **Phase 1 (v2.0)** | Replace sort key, add call_counter, smart defaults, daily pacing, enhanced quality gate | Low — behavioral improvement, backward compatible |
 | **Phase 2** | Exponential backoff, 429 immediate-open, conservation hysteresis | Medium — resilience |
 | **Phase 3** | Enhanced status output, diagnostic notes, tier deprecation warnings | Low — UX polish |
 
-### 19.3 Implementation Notes
+### 20.1 Implementation Notes
 
 Key concerns identified during feasibility review:
 - **call_counter persistence**: Best-effort in-memory, flush to quota.json periodically. Eventual consistency is acceptable for round-robin fairness.
