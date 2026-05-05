@@ -1,7 +1,7 @@
 
 import pytest
 
-from pivot_web_search_mcp import extraction, http_client, providers, quota, search, server
+from pivot_web_search_mcp import extraction, http_client, providers, quota, routing, search, server
 
 
 @pytest.fixture(autouse=True)
@@ -39,10 +39,12 @@ def _reset_proxy_config():
 
 @pytest.fixture(autouse=True)
 def _reset_circuit_breaker():
-    """Reset routing circuit breaker state between tests."""
+    """Reset routing circuit breaker and call counter between tests."""
     server._breaker.reset_all()
+    routing._call_counter.reset()
     yield
     server._breaker.reset_all()
+    routing._call_counter.reset()
 
 
 @pytest.fixture(autouse=True)

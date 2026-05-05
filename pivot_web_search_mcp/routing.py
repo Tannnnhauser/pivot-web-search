@@ -1,39 +1,56 @@
-"""Tuple-sort routing and circuit breaker for provider selection.
+"""Priority-group routing with hedged execution and circuit breaker.
 
-Replaces the ad-hoc DDG demotion + usage_pct sorting with a generic system:
-- Providers scored as (tier_rank, metric, priority) tuples
-- Circuit breaker tracks per-provider health with sliding window
-- Pacing pressure accounts for time-in-window for paid providers
+Providers are grouped by effective_priority. Same-priority groups are
+executed concurrently with staggered starts (hedging). First response
+passing the quality gate wins. Groups are tried sequentially from
+highest to lowest priority.
 """
 
+from __future__ import annotations
+
+import asyncio
 import time
-from calendar import monthrange
-from collections import deque
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
 from enum import Enum
-from zoneinfo import ZoneInfo
+from typing import Any
 
 from . import quota as _quota
 from .logging import log
+from .quality_gate import Verdict, quality_gate
 
-_PACIFIC = ZoneInfo("America/Los_Angeles")
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
-# Tier ranks for tuple-sort (lexicographic: lower = preferred)
-TIER_RANK = {"free": 0, "daily": 1, "paid": 2}
-
-# Circuit breaker parameters
-CB_WINDOW_SIZE = 5
-CB_MIN_SAMPLES = 3
 CB_CONSECUTIVE_THRESHOLD = 3
-CB_RATE_THRESHOLD = 0.6
-CB_COOLDOWN_SECONDS = 120
+CB_COOLDOWN_SECONDS = 60
 
-# High-water demotion
-HIGH_WATER_PCT = 85.0
-HIGH_WATER_MIN_HOURS = 4
+HEDGE_DELAY_MS = 200
 
-# News demotion tier rank for DDG
-NEWS_DDG_TIER_RANK = 3
+SMART_DEFAULT_PRIORITY: dict[str, int] = {
+    "tavily": 10,
+    "brave": 10,
+    "searxng": 30,
+    "json_api": 30,
+    "gemini": 40,
+    "llm_search": 60,
+    "ddg": 90,
+}
+
+DEFAULT_TIMEOUT: dict[str, float] = {
+    "brave": 4,
+    "tavily": 4,
+    "ddg": 6,
+    "gemini": 20,
+    "searxng": 6,
+    "json_api": 6,
+    "llm_search": 15,
+}
+
+
+# ---------------------------------------------------------------------------
+# Circuit Breaker
+# ---------------------------------------------------------------------------
 
 
 class BreakerState(Enum):
@@ -43,17 +60,17 @@ class BreakerState(Enum):
 
 
 class _BreakerEntry:
-    __slots__ = ("state", "outcomes", "consecutive_failures", "opened_at")
+    __slots__ = ("state", "consecutive_failures", "opened_at", "cooldown_override")
 
     def __init__(self):
         self.state = BreakerState.CLOSED
-        self.outcomes: deque = deque(maxlen=CB_WINDOW_SIZE)
         self.consecutive_failures = 0
         self.opened_at: float | None = None
+        self.cooldown_override: float | None = None
 
 
 class CircuitBreaker:
-    """Per-provider circuit breaker with sliding-window failure tracking."""
+    """Per-provider circuit breaker. Opens after 3 consecutive failures or on 429."""
 
     def __init__(self):
         self._breakers: dict[str, _BreakerEntry] = {}
@@ -63,11 +80,15 @@ class CircuitBreaker:
             self._breakers[name] = _BreakerEntry()
         return self._breakers[name]
 
+    def _cooldown_for(self, entry: _BreakerEntry) -> float:
+        return entry.cooldown_override or CB_COOLDOWN_SECONDS
+
     def get_state(self, name: str) -> BreakerState:
         entry = self._get_entry(name)
         if entry.state == BreakerState.OPEN and entry.opened_at is not None:
-            if time.time() - entry.opened_at >= CB_COOLDOWN_SECONDS:
+            if time.time() - entry.opened_at >= self._cooldown_for(entry):
                 entry.state = BreakerState.HALF_OPEN
+                entry.cooldown_override = None
                 log(f"{name} breaker HALF_OPEN (cooldown expired)")
         return entry.state
 
@@ -75,52 +96,51 @@ class CircuitBreaker:
         state = self.get_state(name)
         return state in (BreakerState.CLOSED, BreakerState.HALF_OPEN)
 
-    def record(self, name: str, success: bool) -> None:
+    def record_success(self, name: str) -> None:
+        entry = self._get_entry(name)
+        state = self.get_state(name)
+        if state == BreakerState.HALF_OPEN:
+            entry.state = BreakerState.CLOSED
+            entry.consecutive_failures = 0
+            entry.opened_at = None
+            log(f"{name} breaker CLOSED (probe succeeded)")
+        elif state == BreakerState.CLOSED:
+            entry.consecutive_failures = 0
+
+    def record_failure(self, name: str) -> None:
         entry = self._get_entry(name)
         state = self.get_state(name)
 
         if state == BreakerState.HALF_OPEN:
-            if success:
-                entry.state = BreakerState.CLOSED
-                entry.outcomes.clear()
-                entry.consecutive_failures = 0
-                entry.opened_at = None
-                log(f"{name} breaker CLOSED (probe succeeded)")
-            else:
-                entry.state = BreakerState.OPEN
-                entry.opened_at = time.time()
-                log(f"{name} breaker OPEN (probe failed, cooldown restarted)")
+            entry.state = BreakerState.OPEN
+            entry.opened_at = time.time()
+            log(f"{name} breaker OPEN (probe failed, cooldown restarted)")
             return
 
         if state == BreakerState.OPEN:
             return
 
-        # CLOSED state
-        entry.outcomes.append(success)
-        if success:
-            entry.consecutive_failures = 0
-        else:
-            entry.consecutive_failures += 1
-
-        should_open = False
+        entry.consecutive_failures += 1
         if entry.consecutive_failures >= CB_CONSECUTIVE_THRESHOLD:
-            should_open = True
-        elif len(entry.outcomes) >= CB_MIN_SAMPLES:
-            failure_count = sum(1 for o in entry.outcomes if not o)
-            if failure_count / len(entry.outcomes) > CB_RATE_THRESHOLD:
-                should_open = True
-
-        if should_open:
             entry.state = BreakerState.OPEN
             entry.opened_at = time.time()
             log(f"{name} breaker OPEN after {entry.consecutive_failures} consecutive failures")
+
+    def open_immediately(self, name: str, cooldown_s: float | None = None) -> None:
+        """Open breaker immediately (e.g. on 429). Optional custom cooldown from Retry-After."""
+        entry = self._get_entry(name)
+        entry.state = BreakerState.OPEN
+        entry.opened_at = time.time()
+        if cooldown_s is not None:
+            entry.cooldown_override = min(max(cooldown_s, 10), 600)
+        log(f"{name} breaker OPEN immediately (cooldown={self._cooldown_for(entry):.0f}s)")
 
     def time_until_recovery(self, name: str) -> float:
         entry = self._get_entry(name)
         if entry.state != BreakerState.OPEN or entry.opened_at is None:
             return 0.0
         elapsed = time.time() - entry.opened_at
-        return max(0.0, CB_COOLDOWN_SECONDS - elapsed)
+        return max(0.0, self._cooldown_for(entry) - elapsed)
 
     def force_half_open(self, name: str) -> None:
         entry = self._get_entry(name)
@@ -133,141 +153,327 @@ class CircuitBreaker:
     def get_status(self, name: str) -> dict:
         entry = self._get_entry(name)
         state = self.get_state(name)
-        recent_ok = sum(1 for o in entry.outcomes if o)
-        total = len(entry.outcomes)
-        status = {"state": state.value, "recent_ok": recent_ok, "recent_total": total}
+        status: dict[str, Any] = {
+            "state": state.value,
+            "consecutive_failures": entry.consecutive_failures,
+        }
         if state == BreakerState.OPEN:
             status["cooldown_remaining"] = round(self.time_until_recovery(name), 1)
         return status
 
 
 # ---------------------------------------------------------------------------
-# Pacing pressure
+# Call counter (round-robin within same-priority groups)
 # ---------------------------------------------------------------------------
 
 
-def compute_pacing_pressure(provider_name: str) -> float:
-    """Pacing pressure: actual_usage_pct / elapsed_time_pct.
+class _CallCounter:
+    def __init__(self):
+        self._counts: dict[str, int] = {}
 
-    > 1.0 means consuming faster than budget allows.
-    Returns 0.0 if no quota data available.
-    """
-    data = _quota.load_quota()
-    entry = data.get(provider_name, {})
-    limit = entry.get("limit")
-    if not limit or limit <= 0:
-        return 0.0
+    def value(self, name: str) -> int:
+        return self._counts.get(name, 0)
 
-    used = entry.get("used", 0)
-    usage_frac = used / limit
-    period = entry.get("period", "monthly")
+    def increment(self, name: str) -> None:
+        self._counts[name] = self._counts.get(name, 0) + 1
 
-    if period == "rolling":
-        elapsed = _rolling_elapsed(entry)
-    else:
-        elapsed = _monthly_elapsed()
-
-    elapsed = max(elapsed, 0.01)
-    return usage_frac / elapsed
+    def reset(self) -> None:
+        self._counts.clear()
 
 
-def _monthly_elapsed() -> float:
-    """Fraction of current month elapsed (UTC)."""
-    now = datetime.now(timezone.utc)
-    _, days_in_month = monthrange(now.year, now.month)
-    return now.day / days_in_month
-
-
-def _rolling_elapsed(entry: dict) -> float:
-    """Fraction of rolling window elapsed, using reset_at timestamp."""
-    reset_at_str = entry.get("reset_at")
-    if not reset_at_str:
-        return 1.0  # no reset_at → assume fully elapsed (neutral pressure)
-    try:
-        reset_dt = datetime.fromisoformat(reset_at_str)
-    except (ValueError, TypeError):
-        return 1.0
-
-    now = datetime.now(timezone.utc)
-    remaining = (reset_dt - now).total_seconds()
-    if remaining <= 0:
-        return 1.0
-
-    last_synced_str = entry.get("last_synced")
-    if last_synced_str:
-        try:
-            last_synced = datetime.fromisoformat(last_synced_str)
-            total_window = (reset_dt - last_synced).total_seconds()
-            if total_window > 0:
-                return 1.0 - (remaining / total_window)
-        except (ValueError, TypeError):
-            pass
-
-    # Fallback: assume 30-day window
-    total_window = 30 * 24 * 3600
-    return 1.0 - (remaining / total_window)
+_call_counter = _CallCounter()
 
 
 # ---------------------------------------------------------------------------
-# Routing
+# Provider selection and grouping
 # ---------------------------------------------------------------------------
 
 
-def _hours_until_pt_midnight() -> float:
-    """Hours remaining until next PT midnight."""
-    now = datetime.now(_PACIFIC)
-    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    if now >= midnight:
-        from datetime import timedelta
-        midnight += timedelta(days=1)
-    return (midnight - now).total_seconds() / 3600
+@dataclass
+class ScoredProvider:
+    provider: Any  # SearchProvider
+    effective_priority: int
+    call_counter: int
+    rr_seed: int
 
 
-def route_providers(providers, breaker: CircuitBreaker, *, is_news: bool = False) -> list:
-    """Sort providers by (tier_rank, metric, priority). Returns active providers only."""
-    scored = []
-    has_healthy_non_ddg = False
-
-    # Pre-scan for news demotion safety check
-    if is_news:
-        for p in providers:
-            if p.provider_type != "ddg" and not _quota.is_exhausted(p.name) and breaker.is_available(p.name):
-                has_healthy_non_ddg = True
-                break
+def select_providers(
+    providers: list,
+    breaker: CircuitBreaker,
+    affinity: str = "general",
+) -> list[ScoredProvider]:
+    """Filter and score eligible providers for routing."""
+    candidates = []
 
     for p in providers:
+        if not p.enabled:
+            continue
+
+        # Affinity gate
+        if getattr(p, "affinity", "general") == "deep" and affinity != "deep":
+            continue
+        if affinity == "deep" and getattr(p, "affinity", "general") not in ("general", "deep"):
+            continue
+
+        # Quota gate
         if _quota.is_exhausted(p.name):
+            log(f"SKIP {p.name}: quota exhausted")
             continue
+
+        # Circuit breaker gate
         if not breaker.is_available(p.name):
+            log(f"SKIP {p.name}: circuit breaker OPEN ({breaker.time_until_recovery(p.name):.0f}s remaining)")
             continue
 
-        tier = p.tier
-        rank = TIER_RANK.get(tier, 2)
+        candidates.append(ScoredProvider(
+            provider=p,
+            effective_priority=getattr(p, "effective_priority", p.priority),
+            call_counter=_call_counter.value(p.name),
+            rr_seed=getattr(p, "_rr_seed", 0),
+        ))
 
-        # High-water demotion for daily tier
-        if tier == "daily" and rank == 1:
-            usage = _quota.get_usage_pct(p.name)
-            if usage > HIGH_WATER_PCT and _hours_until_pt_midnight() > HIGH_WATER_MIN_HOURS:
-                rank = 2
-                hours_left = _hours_until_pt_midnight()
-                log(f"{p.name} demoted to paid tier (usage {usage:.0f}%, {hours_left:.1f}h until reset)")
+    candidates.sort(key=lambda c: (c.effective_priority, c.call_counter, c.rr_seed))
+    return candidates
 
-        # News demotion for DDG
-        if is_news and p.provider_type == "ddg" and has_healthy_non_ddg:
-            rank = NEWS_DDG_TIER_RANK
 
-        # Compute metric per tier
-        if tier == "free":
-            metric = 0.0
-        elif tier == "daily":
-            metric = _quota.get_usage_pct(p.name) / 100.0
+def build_priority_groups(candidates: list[ScoredProvider]) -> list[list[ScoredProvider]]:
+    """Group candidates by effective_priority for hedged execution."""
+    if not candidates:
+        return []
+
+    groups: list[list[ScoredProvider]] = []
+    current_priority = candidates[0].effective_priority
+    current_group: list[ScoredProvider] = []
+
+    for c in candidates:
+        if c.effective_priority != current_priority:
+            groups.append(current_group)
+            current_group = []
+            current_priority = c.effective_priority
+        current_group.append(c)
+
+    if current_group:
+        groups.append(current_group)
+    return groups
+
+
+# ---------------------------------------------------------------------------
+# Execution engine
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _AttemptResult:
+    provider_name: str
+    result: Any = None  # SearchResult or None
+    error: str | None = None
+    is_timeout: bool = False
+
+
+@dataclass
+class _FailureInfo:
+    failures: list = field(default_factory=list)
+
+
+async def execute_search(
+    query: str,
+    max_results: int,
+    providers: list,
+    breaker: CircuitBreaker,
+    affinity: str = "general",
+    **kwargs,
+):
+    """Main routing entry: priority-group failover with hedging and quality gate.
+
+    Returns SearchResult, _FailureInfo, or None.
+    """
+    candidates = select_providers(providers, breaker, affinity=affinity)
+
+    if not candidates:
+        recovery = pick_recovery_candidate(providers, breaker)
+        if recovery:
+            candidates = [ScoredProvider(
+                provider=recovery,
+                effective_priority=getattr(recovery, "effective_priority", recovery.priority),
+                call_counter=_call_counter.value(recovery.name),
+                rr_seed=getattr(recovery, "_rr_seed", 0),
+            )]
         else:
-            metric = compute_pacing_pressure(p.name)
+            return _FailureInfo(failures=[{"provider": "all", "error": "all providers unavailable"}])
 
-        scored.append((rank, metric, p.priority, p))
+    groups = build_priority_groups(candidates)
+    best_so_far = None
+    failures: list[dict] = []
+    consecutive_tcp_failures = 0
 
-    scored.sort(key=lambda t: (t[0], t[1], t[2]))
-    return [t[3] for t in scored]
+    for group in groups:
+        group_result = await _execute_priority_group(group, query, max_results, breaker, **kwargs)
+
+        if group_result.error:
+            failures.append({"provider": group_result.provider_name, "error": group_result.error})
+            if group_result.error == "tcp_failure":
+                consecutive_tcp_failures += 1
+                if consecutive_tcp_failures >= 2:
+                    return _FailureInfo(failures=failures)
+            continue
+
+        if group_result.result is None:
+            continue
+
+        consecutive_tcp_failures = 0
+        result = group_result.result
+
+        # Quality gate
+        results_list = result.results if hasattr(result, "results") else []
+        answer = result.answer if hasattr(result, "answer") else None
+        verdict = quality_gate(query, results_list, answer)
+
+        if verdict == Verdict.ACCEPT:
+            log(f"SUCCESS {group_result.provider_name}: {len(results_list)} results, verdict=ACCEPT")
+            return result
+
+        # Partial — keep best so far
+        if best_so_far is None or len(results_list) > len(getattr(best_so_far, "results", [])):
+            best_so_far = result
+            log(f"PARTIAL {group_result.provider_name}: verdict={verdict.value}, continuing")
+
+    if best_so_far is not None:
+        return best_so_far
+    return _FailureInfo(failures=failures)
+
+
+async def _execute_priority_group(
+    group: list[ScoredProvider],
+    query: str,
+    max_results: int,
+    breaker: CircuitBreaker,
+    **kwargs,
+) -> _AttemptResult:
+    """Execute a same-priority group with hedged requests.
+
+    For single-provider groups: direct execution with timeout.
+    For multi-provider groups: staggered starts, first quality-gate pass wins.
+    """
+    if len(group) == 1:
+        return await _attempt_single(group[0], query, max_results, breaker, **kwargs)
+
+    # Hedged execution
+    return await _attempt_hedged(group, query, max_results, breaker, **kwargs)
+
+
+async def _attempt_single(
+    scored: ScoredProvider,
+    query: str,
+    max_results: int,
+    breaker: CircuitBreaker,
+    **kwargs,
+) -> _AttemptResult:
+    """Execute a single provider with its timeout."""
+    p = scored.provider
+    timeout = getattr(p, "timeout_seconds", DEFAULT_TIMEOUT.get(p.provider_type, 6))
+
+    try:
+        result = await asyncio.wait_for(
+            p.search(query, max_results, **kwargs),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        breaker.record_failure(p.name)
+        log(f"{p.name} timed out after {timeout}s")
+        return _AttemptResult(provider_name=p.name, error="timeout", is_timeout=True)
+    except Exception as e:
+        breaker.record_failure(p.name)
+        log(f"{p.name} error: {e}")
+        return _AttemptResult(provider_name=p.name, error=str(e))
+
+    _call_counter.increment(p.name)
+
+    if result is not None:
+        breaker.record_success(p.name)
+        _quota.record_usage(p.name)
+        return _AttemptResult(provider_name=p.name, result=result)
+    else:
+        breaker.record_failure(p.name)
+        return _AttemptResult(provider_name=p.name, error="returned no results")
+
+
+async def _attempt_hedged(
+    group: list[ScoredProvider],
+    query: str,
+    max_results: int,
+    breaker: CircuitBreaker,
+    **kwargs,
+) -> _AttemptResult:
+    """Staggered concurrent execution. First quality-gate pass wins."""
+
+    async def _delayed_attempt(scored: ScoredProvider, delay_ms: int):
+        if delay_ms > 0:
+            await asyncio.sleep(delay_ms / 1000.0)
+        return await _attempt_single(scored, query, max_results, breaker, **kwargs)
+
+    tasks: dict[asyncio.Task, ScoredProvider] = {}
+    for i, scored in enumerate(group):
+        delay = i * HEDGE_DELAY_MS
+        task = asyncio.create_task(_delayed_attempt(scored, delay))
+        tasks[task] = scored
+
+    outer_timeout = max(
+        getattr(s.provider, "timeout_seconds", DEFAULT_TIMEOUT.get(s.provider.provider_type, 6))
+        for s in group
+    ) + (len(group) - 1) * HEDGE_DELAY_MS / 1000.0
+
+    best_partial: _AttemptResult | None = None
+    remaining = set(tasks.keys())
+
+    try:
+        deadline = time.time() + outer_timeout
+        while remaining:
+            wait_timeout = max(deadline - time.time(), 0.1)
+            done, remaining = await asyncio.wait(
+                remaining, timeout=wait_timeout, return_when=asyncio.FIRST_COMPLETED
+            )
+
+            if not done:
+                break
+
+            for task in done:
+                attempt = task.result()
+                if attempt.result is not None:
+                    results_list = attempt.result.results if hasattr(attempt.result, "results") else []
+                    answer = attempt.result.answer if hasattr(attempt.result, "answer") else None
+                    verdict = quality_gate(query, results_list, answer)
+
+                    if verdict == Verdict.ACCEPT:
+                        # Winner — cancel remaining
+                        for t in remaining:
+                            t.cancel()
+                        return attempt
+
+                    if best_partial is None or len(results_list) > len(
+                        getattr(best_partial.result, "results", []) if best_partial.result else []
+                    ):
+                        best_partial = attempt
+                elif attempt.error and best_partial is None:
+                    best_partial = attempt
+
+    finally:
+        for t in remaining:
+            t.cancel()
+        # Suppress cancellation errors
+        for t in remaining:
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    if best_partial is not None:
+        return best_partial
+    return _AttemptResult(provider_name=group[0].provider.name, error="all hedged attempts failed")
+
+
+# ---------------------------------------------------------------------------
+# Recovery
+# ---------------------------------------------------------------------------
 
 
 def pick_recovery_candidate(providers, breaker: CircuitBreaker):
@@ -276,6 +482,8 @@ def pick_recovery_candidate(providers, breaker: CircuitBreaker):
     best_time = float("inf")
 
     for p in providers:
+        if not p.enabled:
+            continue
         if _quota.is_exhausted(p.name):
             continue
         remaining = breaker.time_until_recovery(p.name)

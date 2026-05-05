@@ -31,7 +31,7 @@ from .providers import (
     load_proxies,
     reload_proxies,
 )
-from .routing import CircuitBreaker, pick_recovery_candidate, route_providers
+from .routing import CircuitBreaker, execute_search, select_providers
 from .search import dedup_and_rank
 
 
@@ -112,19 +112,11 @@ def _filter_by_domains(results, allowed_domains, blocked_domains):
 _breaker = CircuitBreaker()
 
 
-def _record_outcome(provider, result):
-    """Record search outcome to circuit breaker."""
-    if result is None or (hasattr(result, "results") and not result.results):
-        _breaker.record(provider.name, success=False)
-    else:
-        _breaker.record(provider.name, success=True)
-
-
 async def _search_with_registry(query, max_results, provider_name="auto", **kwargs):
     """Run search through the provider registry with failover.
 
-    Quality-aware: continues to the next provider if results are too few.
-    Quota-aware: prefers providers with lower usage, skips exhausted ones.
+    Explicit provider: direct execution with timeout and health check.
+    Auto mode: priority-group execution with hedging and quality gate.
     Returns SearchResult, _FailureInfo (all failed), or None.
     """
     if provider_name and provider_name != "auto":
@@ -136,79 +128,80 @@ async def _search_with_registry(query, max_results, provider_name="auto", **kwar
         ok, detail = await p.health_check()
         if not ok:
             return _FailureInfo(failures=[{"provider": provider_name, "error": detail or "health check failed"}])
-        result = await p.search(query, max_results, **kwargs)
+        try:
+            result = await asyncio.wait_for(
+                p.search(query, max_results, **kwargs),
+                timeout=p.timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            _breaker.record_failure(p.name)
+            return _FailureInfo(failures=[{"provider": p.name, "error": f"timed out after {p.timeout_seconds}s"}])
+        except Exception as e:
+            _breaker.record_failure(p.name)
+            return _FailureInfo(failures=[{"provider": p.name, "error": str(e)}])
         if result is not None:
             _quota.record_usage(p.name)
-        _record_outcome(p, result)
+            _breaker.record_success(p.name)
+        else:
+            _breaker.record_failure(p.name)
         return result
 
-    is_news = kwargs.get("news", False)
-    ordered = route_providers(_registry.get_ordered(), _breaker, is_news=is_news)
-
-    if not ordered:
-        recovery = pick_recovery_candidate(_registry.get_ordered(), _breaker)
-        if recovery:
-            ordered = [recovery]
-
-    min_acceptable = min(2, max_results)
-    best_so_far = None
-    failure_details = []
-
-    for p in ordered:
-        try:
-            result = await p.search(query, max_results, **kwargs)
-        except Exception as e:
-            failure_details.append({"provider": p.name, "error": str(e)})
-            _record_outcome(p, None)
-            continue
-        _record_outcome(p, result)
-        if result is not None and len(result.results) >= min_acceptable:
-            _quota.record_usage(p.name)
-            return result
-        if result is not None and (best_so_far is None or len(result.results) > len(best_so_far.results)):
-            best_so_far = result
-            _quota.record_usage(p.name)
-            log(
-                f"{p.name} returned only {len(result.results)} results, trying next provider"
-            )
-        elif result is None:
-            failure_details.append({"provider": p.name, "error": "returned no results"})
-
-    if best_so_far is not None:
-        return best_so_far
-    return _FailureInfo(failures=failure_details)
+    # Auto mode: delegate to routing engine
+    affinity = kwargs.pop("affinity", "general")
+    result = await execute_search(
+        query, max_results, _registry.get_ordered(), _breaker,
+        affinity=affinity, **kwargs,
+    )
+    # Convert routing._FailureInfo to server._FailureInfo
+    from .routing import _FailureInfo as _RoutingFailure
+    if isinstance(result, _RoutingFailure):
+        return _FailureInfo(failures=result.failures)
+    return result
 
 
 async def _search_super_with_registry(query, max_results, **kwargs):
-    """Query all enabled providers in parallel, deduplicate and rank.
+    """Query all eligible providers in parallel with per-provider timeouts.
 
-    Super mode ignores breaker state (maximum coverage) but records outcomes.
-    Quota-aware: skips exhausted providers. Records usage for all that returned results.
-    Returns SearchResult or None.
+    Super mode ignores priority ordering — all providers run concurrently.
+    Per-provider timeouts are enforced. Results merged via dedup_and_rank.
     """
-    providers = [p for p in _registry.get_ordered() if not _quota.is_exhausted(p.name)]
-    if not providers:
+    affinity = kwargs.pop("affinity", "general")
+    candidates = select_providers(_registry.get_ordered(), _breaker, affinity=affinity)
+
+    if not candidates:
         return None
+
+    async def _timed_search(provider):
+        try:
+            return await asyncio.wait_for(
+                provider.search(query, max_results, **kwargs),
+                timeout=provider.timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            _breaker.record_failure(provider.name)
+            log(f"super: {provider.name} timed out after {provider.timeout_seconds}s")
+            return None
+        except Exception as e:
+            _breaker.record_failure(provider.name)
+            log(f"super: {provider.name} failed: {e}")
+            return None
+
+    tasks = [_timed_search(c.provider) for c in candidates]
+    search_results = await asyncio.gather(*tasks)
 
     results_by_provider = {}
     answer = None
 
-    tasks = [p.search(query, max_results, **kwargs) for p in providers]
-    search_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    for p, sr in zip(providers, search_results):
-        if isinstance(sr, BaseException):
-            log(f"super: {p.name} failed: {sr}")
-            _record_outcome(p, None)
-            continue
-        _record_outcome(p, sr)
+    for c, sr in zip(candidates, search_results):
+        p = c.provider
         if sr and sr.results:
             results_by_provider[p.name] = sr.results
             _quota.record_usage(p.name)
+            _breaker.record_success(p.name)
             log(f"super: {p.name} returned {len(sr.results)} results")
             if sr.answer and not answer:
                 answer = sr.answer
-        else:
+        elif sr is None:
             log(f"super: {p.name} returned nothing")
 
     if not results_by_provider:
@@ -353,9 +346,12 @@ async def WebSearch(
                 if include_domains or exclude_domains:
                     results = _filter_by_domains(results, include_domains, exclude_domains)
                 if results:
-                    _breaker.record("brave", success=True)
+                    _breaker.record_success("brave")
                     return _format_content_results(results, query)
-            _breaker.record("brave", success=(llm_result is not None))
+            if llm_result is not None:
+                _breaker.record_success("brave")
+            else:
+                _breaker.record_failure("brave")
 
         sr = None
 
@@ -506,13 +502,14 @@ async def WebSearchConfig(
     providers = _registry.get_all()
     quota_summary = _quota.get_quota_summary()
     provider_info = []
-    for p in sorted(providers, key=lambda x: x.priority):
+    for p in sorted(providers, key=lambda x: x.effective_priority):
         available, detail = await p.health_check()
         info = {
             "name": p.name,
             "type": p.provider_type,
-            "tier": p.tier,
-            "priority": p.priority,
+            "priority": p.effective_priority,
+            "affinity": p.affinity,
+            "timeout": p.timeout_seconds,
             "enabled": p.enabled,
             "available": available,
             "detail": detail,

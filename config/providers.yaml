@@ -1,51 +1,56 @@
-# Search provider configuration for Pivot Web Search plugin.
-# Providers are tried in priority order (lower = tried first) during failover.
-# In super mode, all enabled providers are queried in parallel.
+# Pivot Web Search — Provider Configuration
+#
+# Providers are tried by priority (lower number = tried first).
+# Same-priority providers are hedged (queried concurrently, first quality result wins).
+# If no priority is set, smart defaults apply based on provider type:
+#   tavily/brave = 10, searxng/json_api = 30, gemini = 40, llm_search = 60, ddg = 90
+#
+# Fields:
+#   name        (required) Unique identifier
+#   type        (required) Adapter type: ddg, tavily, brave, gemini, searxng, json_api, llm_search
+#   enabled     (optional) Default: true
+#   priority    (optional) Lower = higher priority. Omit to use smart default.
+#   timeout     (optional) Per-provider timeout in seconds. Type-based defaults apply.
+#   affinity    (optional) "general" (default) or "deep" (only used on explicit deep request)
+#   api_key_env (optional) Environment variable holding the API key
 
 providers:
-  - name: ddg
-    type: ddg
-    tier: free
-    enabled: true
-    priority: 10
-
   - name: tavily
     type: tavily
-    tier: paid
-    enabled: true
-    priority: 20
     api_key_env: TAVILY_API_KEY
+    # priority: 10 (smart default — hedged with brave)
+    # timeout: 4 (smart default)
 
   - name: brave
     type: brave
-    tier: paid
-    enabled: true
-    priority: 30
     api_key_env: BRAVE_API_KEY
+    # priority: 10 (smart default — hedged with tavily)
+    # timeout: 4 (smart default)
 
   - name: gemini
     type: gemini
-    tier: daily
-    enabled: true
-    priority: 40
     api_key_env: GEMINI_SEARCH_API_KEY
     model: gemini-2.5-flash
+    # priority: 40 (smart default)
+    # timeout: 20 (smart default)
 
-  # Example: self-hosted SearXNG instance
+  - name: ddg
+    type: ddg
+    # priority: 90 (smart default — exhaustion fallback)
+    # timeout: 6 (smart default)
+
+  # ─── Self-hosted SearXNG ─────────────────────────────────────────────
   # - name: searxng-local
   #   type: searxng
-  #   enabled: true
-  #   priority: 5
   #   endpoint: "http://localhost:8888/search"
-  #   format: json
+  #   # priority: 30 (smart default)
+  #   # timeout: 6 (smart default)
 
-  # Example: generic JSON search API (e.g. Serper)
-  # You can define multiple json_api instances with different names —
-  # each gets independent priority, quota tracking, and circuit breaker.
+  # ─── Generic JSON API (e.g. Serper, Google CSE) ──────────────────────
+  # Multiple json_api instances allowed — each gets independent priority,
+  # quota tracking, and circuit breaker state.
   # - name: serper
   #   type: json_api
-  #   enabled: false
-  #   priority: 25
   #   endpoint: "https://google.serper.dev/search"
   #   api_key_env: SERPER_API_KEY
   #   method: POST
@@ -60,52 +65,44 @@ providers:
   #     url: "link"
   #     snippet: "snippet"
 
-  # - name: google-cse
-  #   type: json_api
-  #   enabled: false
-  #   priority: 35
-  #   endpoint: "https://www.googleapis.com/customsearch/v1"
-  #   api_key_env: GOOGLE_CSE_KEY
-  #   method: GET
-  #   request_params:
-  #     q: "{{query}}"
-  #     num: "{{max_results}}"
-  #     cx: "your-search-engine-id"
-  #   response_mapping:
-  #     results_path: "items"
-  #     title: "title"
-  #     url: "link"
-  #     snippet: "snippet"
-
-  # Example: LLM-based search providers (chat_completions format)
-  # Any OpenAI-compatible endpoint with built-in web search grounding.
-  # Supports: Perplexity Sonar Pro, SAP AI Core, or any /chat/completions API
-  # that returns search_results, annotations, or citations in the response.
+  # ─── LLM Search (chat_completions format) ────────────────────────────
+  # Any OpenAI-compatible endpoint with web search grounding.
   # - name: sonar-pro
   #   type: llm_search
-  #   tier: daily
-  #   priority: 15
   #   api_format: chat_completions
-  #   endpoint: "https://api.ai.example.com/v2/chat/completions"
+  #   endpoint: "https://api.perplexity.ai/chat/completions"
   #   model: sonar-pro
-  #   max_tokens: 500
-  #   timeout: 45
-  #   system_prompt: "You are a search assistant. Provide a concise answer with source citations."
-  #   headers:
-  #     AI-Resource-Group: default
-  #   api_key_env: AI_CORE_TOKEN
+  #   api_key_env: PERPLEXITY_API_KEY
+  #   timeout: 15
+  #   # priority: 60 (smart default)
+  #   # affinity: general
 
-  # Example: LLM-based search providers (responses format)
-  # OpenAI Responses API (/responses) with web_search tool.
+  # ─── LLM Search (responses format — OpenAI Responses API) ───────────
   # - name: gpt-web-search
   #   type: llm_search
-  #   tier: paid
-  #   priority: 25
   #   api_format: responses
   #   endpoint: "https://api.openai.com/v1/responses"
   #   model: gpt-4o
-  #   max_tokens: 4000
-  #   timeout: 60
+  #   api_key_env: OPENAI_API_KEY
+  #   timeout: 45
   #   search_tool: web_search
   #   search_context_size: medium
-  #   api_key_env: OPENAI_API_KEY
+
+  # ─── Deep Research (opt-in only, never used in normal routing) ───────
+  # - name: sonar-deep-research
+  #   type: llm_search
+  #   api_format: chat_completions
+  #   endpoint: "https://api.perplexity.ai/chat/completions"
+  #   model: sonar-deep-research
+  #   api_key_env: PERPLEXITY_API_KEY
+  #   affinity: deep
+  #   timeout: 180
+
+# Circuit breaker configuration
+circuit_breaker:
+  consecutive_threshold: 3
+  cooldown: 60
+
+# Latency configuration
+latency:
+  hedge_delay_ms: 200

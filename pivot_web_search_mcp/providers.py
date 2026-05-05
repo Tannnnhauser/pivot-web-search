@@ -75,6 +75,8 @@ class SearchProvider:
         self.priority = priority
         self.enabled = enabled
         self.config = config or {}
+        self._effective_priority: int | None = None
+        self._rr_seed: int = 0
 
     async def search(self, query, max_results=5, **kwargs):
         """Returns SearchResult or None on failure."""
@@ -85,18 +87,26 @@ class SearchProvider:
         return False, "not implemented"
 
     @property
-    def tier(self) -> str:
-        """Routing tier: 'free', 'daily', or 'paid'. From config or inferred."""
-        explicit = self.config.get("tier")
-        if explicit in ("free", "daily", "paid"):
-            return explicit
-        if self.provider_type in ("ddg", "searxng"):
-            return "free"
-        if self.provider_type == "gemini":
-            return "daily"
-        if self.config.get("api_key_env"):
-            return "paid"
-        return "free"
+    def affinity(self) -> str:
+        """Provider affinity: 'general' or 'deep'."""
+        val = self.config.get("affinity", "general")
+        return val if val in ("general", "deep") else "general"
+
+    @property
+    def timeout_seconds(self) -> float:
+        """Per-provider timeout in seconds."""
+        from .routing import DEFAULT_TIMEOUT
+        explicit = self.config.get("timeout")
+        if explicit is not None:
+            return float(explicit)
+        return DEFAULT_TIMEOUT.get(self.provider_type, 6)
+
+    @property
+    def effective_priority(self) -> int:
+        """Priority used for routing (smart default or explicit)."""
+        if self._effective_priority is not None:
+            return self._effective_priority
+        return self.priority
 
     def __repr__(self):
         state = "on" if self.enabled else "off"
@@ -573,7 +583,27 @@ class ProviderRegistry:
                 config=entry,
             )
             providers.append(p)
+        self._apply_smart_defaults(providers)
         return providers
+
+    def _apply_smart_defaults(self, providers):
+        """Assign effective_priority based on provider type when not explicitly set."""
+        from .routing import SMART_DEFAULT_PRIORITY
+
+        enabled_types = {p.provider_type for p in providers if p.enabled}
+        free_only = enabled_types <= {"ddg", "searxng"} and not any(
+            p.config.get("api_key_env") for p in providers if p.enabled
+        )
+
+        for i, p in enumerate(providers):
+            p._rr_seed = i
+            explicit_priority = p.config.get("priority")
+            if explicit_priority is not None:
+                p._effective_priority = int(explicit_priority)
+            elif free_only:
+                p._effective_priority = 10
+            else:
+                p._effective_priority = SMART_DEFAULT_PRIORITY.get(p.provider_type, 50)
 
     def _check_reload(self):
         """Reload config if file mtime changed (cheap stat check)."""
