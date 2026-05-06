@@ -82,6 +82,6 @@ class TestBraveLive:
 
 class TestExtractLive:
     async def test_stable_url(self):
-        result = await search.extract_trafilatura(["https://httpbin.org/html"])
+        result = await search.extract_trafilatura(["https://www.example.com"])
         assert result["results"]
         assert len(result["results"][0]["raw_content"]) > 0
