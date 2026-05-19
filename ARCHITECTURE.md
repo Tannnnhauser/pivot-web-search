@@ -163,7 +163,7 @@ sequenceDiagram
 graph TB
     subgraph "Priority-Group Routing"
         direction TB
-        SG[Smart Defaults<br/>LLM=10, Tavily/Brave=20<br/>SearXNG=30, Gemini=40, DDG=90]
+        SG[Smart Defaults<br/>LLM=10, Tavily/Brave/Gemini=20<br/>SearXNG/json_api=30, DDG=90]
         AG[Affinity Gate<br/>deep providers excluded<br/>unless explicitly requested]
         QG[Quota Gate<br/>skip exhausted]
         BG[Breaker Gate<br/>skip circuit-open]

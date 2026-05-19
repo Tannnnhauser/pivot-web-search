@@ -3,7 +3,7 @@
 # Providers are tried by priority (lower number = tried first).
 # Same-priority providers are hedged (queried concurrently, first quality result wins).
 # If no priority is set, smart defaults apply based on provider type:
-#   llm_search = 10, tavily/brave = 20, searxng/json_api = 30, gemini = 40, ddg = 90
+#   llm_search = 10, tavily/brave/gemini = 20, searxng/json_api = 30, ddg = 90
 #
 # Fields:
 #   name        (required) Unique identifier
@@ -31,7 +31,7 @@ providers:
     type: gemini
     api_key_env: GEMINI_SEARCH_API_KEY
     model: gemini-2.5-flash
-    # priority: 40 (smart default)
+    # priority: 20 (smart default — hedged with tavily/brave)
     # timeout: 20 (smart default)
 
   - name: ddg

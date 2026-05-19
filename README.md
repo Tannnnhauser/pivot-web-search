@@ -241,9 +241,8 @@ providers:
 | Type | Priority | Timeout |
 |---|---|---|
 | `llm_search` | 10 | 15s |
-| `tavily` / `brave` | 20 | 4s |
+| `tavily` / `brave` / `gemini` | 20 | 4s / 4s / 20s |
 | `searxng` / `json_api` | 30 | 6s |
-| `gemini` | 40 | 20s |
 | `ddg` | 90 | 6s |
 
 > **Note:** Enabling an `llm_search` provider trades latency for quality — at priority 10 it runs ahead of Tavily/Brave with a 15s timeout, so every query may take 15+s. Bump its `priority` above 20 (or omit it from the config) if latency matters more than answer quality.

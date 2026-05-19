@@ -37,7 +37,8 @@ async def _async_main():
     sp.add_argument("--include-domains", nargs="+", help="Tavily domain filter")
     sp.add_argument("--exclude-domains", nargs="+", help="Tavily domain exclusion")
     sp.add_argument("--format", default="md", choices=["json", "md"])
-    sp.add_argument("--provider", choices=["ddg", "tavily", "brave", "gemini", "auto"], default="auto")
+    sp.add_argument("--provider", default="auto",
+                    help="Provider name (auto, ddg, tavily, brave, gemini, or any name from providers.yaml)")
     sp.add_argument("--super", action="store_true", help="Query all providers in parallel (uses quota on all)")
 
     ep = sub.add_parser("extract", help="Extract full page content from URLs (trafilatura)")
@@ -99,7 +100,11 @@ async def _async_main():
             }
             if args.provider and args.provider != "auto":
                 p = registry.get_by_name(args.provider)
-                if p and p.enabled:
+                if not p:
+                    available = [x.name for x in registry.get_all()]
+                    print(json.dumps({"error": f"Unknown provider '{args.provider}'", "available": available}))
+                    sys.exit(1)
+                if p.enabled:
                     sr = await p.search(args.query, max_results, **search_kwargs)
                     if sr:
                         results = sr.results

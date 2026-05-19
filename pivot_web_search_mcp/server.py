@@ -32,7 +32,7 @@ from .extraction import extract_trafilatura
 from .logging import log
 from .providers import ProviderRegistry, SearchResult
 from .results import dedup_and_rank, to_markdown
-from .routing import CircuitBreaker, FailureInfo, ScoredProvider, _attempt_single, _call_counter, execute_search, select_providers
+from .routing import CircuitBreaker, FailureInfo, ScoredProvider, attempt_single, _call_counter, execute_search, select_providers
 from .validation import MAX_CONTENT_CHARS, validate_url
 
 
@@ -129,7 +129,7 @@ async def _search_with_registry(query, max_results, provider_name="auto", **kwar
             return FailureInfo(failures=[{"provider": provider_name, "error": detail or "health check failed"}])
 
         scored = ScoredProvider(provider=p, effective_priority=0, call_counter=0, rr_seed=0)
-        attempt = await _attempt_single(scored, query, max_results, _breaker, **kwargs)
+        attempt = await attempt_single(scored, query, max_results, _breaker, **kwargs)
         if attempt.result is not None:
             return attempt.result
         return FailureInfo(failures=[{"provider": p.name, "error": attempt.error or "unknown"}])

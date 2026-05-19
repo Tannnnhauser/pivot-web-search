@@ -389,13 +389,13 @@ async def _execute_priority_group(
     For multi-provider groups: staggered starts, first quality-gate pass wins.
     """
     if len(group) == 1:
-        return await _attempt_single(group[0], query, max_results, breaker, **kwargs)
+        return await attempt_single(group[0], query, max_results, breaker, **kwargs)
 
     # Hedged execution
     return await _attempt_hedged(group, query, max_results, breaker, **kwargs)
 
 
-async def _attempt_single(
+async def attempt_single(
     scored: ScoredProvider,
     query: str,
     max_results: int,
@@ -446,7 +446,7 @@ async def _attempt_hedged(
     async def _delayed_attempt(scored: ScoredProvider, delay_ms: int):
         if delay_ms > 0:
             await asyncio.sleep(delay_ms / 1000.0)
-        return await _attempt_single(scored, query, max_results, breaker, **kwargs)
+        return await attempt_single(scored, query, max_results, breaker, **kwargs)
 
     tasks: dict[asyncio.Task, ScoredProvider] = {}
     for i, scored in enumerate(group):

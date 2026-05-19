@@ -276,7 +276,7 @@ class TestSmartDefaults:
         assert SMART_DEFAULT_PRIORITY["brave"] == 20
         assert SMART_DEFAULT_PRIORITY["searxng"] == 30
         assert SMART_DEFAULT_PRIORITY["json_api"] == 30
-        assert SMART_DEFAULT_PRIORITY["gemini"] == 40
+        assert SMART_DEFAULT_PRIORITY["gemini"] == 20
         assert SMART_DEFAULT_PRIORITY["ddg"] == 90
 
     def test_default_timeouts(self):
@@ -383,6 +383,38 @@ class TestExecuteSearch:
         b = CircuitBreaker()
         result = await execute_search("test", 5, providers, b, affinity="general")
         assert result.provider == "general"
+
+    async def test_hedged_cancels_losing_tasks(self):
+        """Once the winning hedged provider returns ACCEPT, the losers must be cancelled."""
+
+        class TrackingProvider(FakeProvider):
+            def __init__(self, name, **kwargs):
+                super().__init__(name, **kwargs)
+                self.was_cancelled = False
+                self.completed = False
+
+            async def search(self, query, max_results=5, **kwargs):
+                try:
+                    if self._search_delay:
+                        await asyncio.sleep(self._search_delay)
+                    self.completed = True
+                    if self._search_error:
+                        raise self._search_error
+                    return self._search_result
+                except asyncio.CancelledError:
+                    self.was_cancelled = True
+                    raise
+
+        fast = TrackingProvider("fast", priority=10, search_delay=0,
+                                search_result=make_result(3, "fast"))
+        slow = TrackingProvider("slow", priority=10, search_delay=5,
+                                search_result=make_result(3, "slow"))
+        b = CircuitBreaker()
+        result = await execute_search("python tutorial", 5, [fast, slow], b)
+        assert result.provider == "fast"
+        assert fast.completed
+        assert not slow.completed
+        assert slow.was_cancelled
 
     async def test_recovery_candidate_on_all_open(self):
         providers = [FakeProvider("solo", priority=10, search_result=make_result(3, "solo"))]
