@@ -9,13 +9,7 @@ import urllib.parse
 import httpx
 from filelock import FileLock
 
-try:
-    from .logging import log
-except ImportError:
-    import sys
-
-    def log(msg):
-        print(f"[pivot-web-search] {msg}", file=sys.stderr)
+from .logging import log
 
 # ---------------------------------------------------------------------------
 # SSL — use certifi CA bundle if available
@@ -32,16 +26,11 @@ except ImportError:
 # Configuration
 # ---------------------------------------------------------------------------
 
-PROXIES = [None]  # legacy default, overridden by config
-
 
 def _get_proxies():
-    """Get proxy list from config (hot-reloadable) or fall back to hardcoded PROXIES."""
-    try:
-        from .providers import load_proxies
-        return load_proxies()
-    except Exception:
-        return PROXIES
+    """Get proxy list from config (hot-reloadable)."""
+    from .config import load_proxies
+    return load_proxies()
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +131,36 @@ class CrossHostRedirect(Exception):
 # ---------------------------------------------------------------------------
 
 
+async def _try_request_with_redirect(method, url, *, headers, data, timeout, proxy):
+    """Single request with cross-host redirect detection and same-host follow."""
+    resp = await _do_request(method, url, headers=headers, data=data,
+                             timeout=timeout, proxy=proxy)
+    if resp.is_redirect:
+        location = resp.headers.get("location", "")
+        if location:
+            orig_host = (urllib.parse.urlparse(url).hostname or "").removeprefix("www.")
+            new_host = (urllib.parse.urlparse(location).hostname or "").removeprefix("www.")
+            if new_host and orig_host != new_host:
+                raise CrossHostRedirect(orig_host, new_host, location)
+            resp = await _do_request(method, location, headers=headers, data=None,
+                                    timeout=timeout, proxy=proxy)
+    return resp
+
+
+async def _record_proxy_success(host, proxy):
+    async with _proxy_cache_lock:
+        if _proxy_cache.get(host) != proxy:
+            _proxy_cache[host] = proxy
+            _proxy_cache_ts[host] = time.time()
+            while len(_proxy_cache) > _PROXY_CACHE_MAX:
+                evicted = next(iter(_proxy_cache))
+                _proxy_cache.pop(evicted)
+                _proxy_cache_ts.pop(evicted, None)
+            await _save_proxy_cache()
+        else:
+            _proxy_cache_ts[host] = time.time()
+
+
 async def _open_with_fallback(method, url, *, headers=None, data=None, timeout=30):
     """Try cached proxy first, then all others. Cache the winner per hostname.
 
@@ -157,7 +176,6 @@ async def _open_with_fallback(method, url, *, headers=None, data=None, timeout=3
 
     async with _proxy_cache_lock:
         cached = _proxy_cache.get(host)
-        # Evict stale cache entry
         if cached is not None:
             ts = _proxy_cache_ts.get(host, 0)
             if time.time() - ts > _PROXY_CACHE_TTL:
@@ -174,73 +192,31 @@ async def _open_with_fallback(method, url, *, headers=None, data=None, timeout=3
 
     for proxy in ordered:
         try:
-            resp = await _do_request(method, url, headers=headers, data=data,
-                                     timeout=timeout, proxy=proxy)
-            # Check for cross-host redirects
-            if resp.is_redirect:
-                location = resp.headers.get("location", "")
-                if location:
-                    orig_host = (urllib.parse.urlparse(url).hostname or "").removeprefix("www.")
-                    new_host = (urllib.parse.urlparse(location).hostname or "").removeprefix("www.")
-                    if new_host and orig_host != new_host:
-                        raise CrossHostRedirect(orig_host, new_host, location)
-                    # Same-host redirect: follow it
-                    resp = await _do_request(method, location, headers=headers, data=None,
-                                            timeout=timeout, proxy=proxy)
+            try:
+                resp = await _try_request_with_redirect(
+                    method, url, headers=headers, data=data,
+                    timeout=timeout, proxy=proxy)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in (429, 503) and not retried_transient:
+                    retried_transient = True
+                    log(f"HTTP {e.response.status_code}, retrying once after 1s backoff")
+                    await asyncio.sleep(1)
+                    resp = await _try_request_with_redirect(
+                        method, url, headers=headers, data=data,
+                        timeout=timeout, proxy=proxy)
+                    log(f"Connected via {proxy or 'direct'} (retry)")
+                    await _record_proxy_success(host, proxy)
+                    return resp
+                raise
 
-            label = proxy or "direct"
-            log(f"Connected via {label}")
-            async with _proxy_cache_lock:
-                if _proxy_cache.get(host) != proxy:
-                    _proxy_cache[host] = proxy
-                    _proxy_cache_ts[host] = time.time()
-                    while len(_proxy_cache) > _PROXY_CACHE_MAX:
-                        evicted = next(iter(_proxy_cache))
-                        _proxy_cache.pop(evicted)
-                        _proxy_cache_ts.pop(evicted, None)
-                    await _save_proxy_cache()
-                else:
-                    _proxy_cache_ts[host] = time.time()
+            log(f"Connected via {proxy or 'direct'}")
+            await _record_proxy_success(host, proxy)
             return resp
 
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code in (429, 503) and not retried_transient:
-                retried_transient = True
-                log(f"HTTP {e.response.status_code}, retrying once after 1s backoff")
-                await asyncio.sleep(1)
-                try:
-                    resp = await _do_request(method, url, headers=headers, data=data,
-                                            timeout=timeout, proxy=proxy)
-                    if resp.is_redirect:
-                        location = resp.headers.get("location", "")
-                        if location:
-                            orig_host = (urllib.parse.urlparse(url).hostname or "").removeprefix("www.")
-                            new_host = (urllib.parse.urlparse(location).hostname or "").removeprefix("www.")
-                            if new_host and orig_host != new_host:
-                                raise CrossHostRedirect(orig_host, new_host, location)
-                            resp = await _do_request(method, location, headers=headers, data=None,
-                                                    timeout=timeout, proxy=proxy)
-                    label = proxy or "direct"
-                    log(f"Connected via {label} (retry)")
-                    async with _proxy_cache_lock:
-                        if _proxy_cache.get(host) != proxy:
-                            _proxy_cache[host] = proxy
-                            _proxy_cache_ts[host] = time.time()
-                            while len(_proxy_cache) > _PROXY_CACHE_MAX:
-                                evicted = next(iter(_proxy_cache))
-                                _proxy_cache.pop(evicted)
-                                _proxy_cache_ts.pop(evicted, None)
-                            await _save_proxy_cache()
-                        else:
-                            _proxy_cache_ts[host] = time.time()
-                    return resp
-                except httpx.HTTPStatusError:
-                    raise
-                except Exception:
-                    raise e
+        except CrossHostRedirect:
             raise
 
-        except CrossHostRedirect:
+        except httpx.HTTPStatusError:
             raise
 
         except Exception as e:

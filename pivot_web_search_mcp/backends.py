@@ -5,16 +5,15 @@ import json
 import time
 import urllib.parse
 
-from .http_client import _get_proxies, _proxy_cache, _proxy_cache_lock, _save_proxy_cache
-from .validation import _load_brave_key, _load_tavily_key
-
-try:
-    from .logging import log
-except ImportError:
-    import sys
-
-    def log(msg):
-        print(f"[pivot-web-search] {msg}", file=sys.stderr)
+from .http_client import (
+    _get_proxies,
+    _open_with_fallback,
+    _proxy_cache,
+    _proxy_cache_lock,
+    _save_proxy_cache,
+)
+from .logging import log
+from .validation import _load_env_key
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -100,7 +99,7 @@ async def search_ddg(query, max_results=5, region="wt-wt", timelimit=None, news=
 async def search_tavily(query, max_results=5, include_answer=False, search_depth="basic",
                         topic="general", days=None, include_domains=None, exclude_domains=None):
     """Tavily Search API."""
-    key = _load_tavily_key()
+    key = _load_env_key("TAVILY_API_KEY")
     if not key:
         log("No TAVILY_API_KEY, skipping Tavily")
         return None
@@ -123,8 +122,7 @@ async def search_tavily(query, max_results=5, include_answer=False, search_depth
 
     data = json.dumps(payload).encode("utf-8")
     try:
-        from . import search as s
-        resp = await s._open_with_fallback(
+        resp = await _open_with_fallback(
             "POST", TAVILY_URL,
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
             data=data)
@@ -145,15 +143,14 @@ async def search_tavily(query, max_results=5, include_answer=False, search_depth
 
 async def search_brave(query, max_results=5):
     """Brave Search API. Returns (results, headers_dict) or None."""
-    key = _load_brave_key()
+    key = _load_env_key("BRAVE_API_KEY")
     if not key:
         log("No Brave API key, skipping Brave")
         return None
 
     params = urllib.parse.urlencode({"q": query, "count": max_results})
     try:
-        from . import search as s
-        resp = await s._open_with_fallback(
+        resp = await _open_with_fallback(
             "GET", f"{BRAVE_URL}?{params}",
             headers={"Accept": "application/json", "Accept-Encoding": "gzip",
                      "X-Subscription-Token": key})
@@ -182,7 +179,7 @@ async def search_brave_llm_context(query, max_results=20, max_tokens=8192,
       - url, title, snippet (joined snippets text)
       - snippets (list of individual extracted text chunks)
     """
-    key = _load_brave_key()
+    key = _load_env_key("BRAVE_API_KEY")
     if not key:
         log("No Brave API key, skipping Brave LLM Context")
         return None
@@ -200,8 +197,7 @@ async def search_brave_llm_context(query, max_results=20, max_tokens=8192,
 
     qs = urllib.parse.urlencode(params)
     try:
-        from . import search as s
-        resp = await s._open_with_fallback(
+        resp = await _open_with_fallback(
             "GET", f"{BRAVE_LLM_CONTEXT_URL}?{qs}",
             headers={"Accept": "application/json", "Accept-Encoding": "gzip",
                      "X-Subscription-Token": key},

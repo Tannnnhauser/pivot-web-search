@@ -8,20 +8,14 @@ import time
 
 import httpx
 
+from .http_client import CrossHostRedirect, _open_with_fallback
+from .logging import log
 from .validation import (
     MAX_FETCH_BYTES,
     _is_binary_content_type,
-    _load_tavily_key,
+    _load_env_key,
     validate_url,
 )
-
-try:
-    from .logging import log
-except ImportError:
-    import sys
-
-    def log(msg):
-        print(f"[pivot-web-search] {msg}", file=sys.stderr)
 
 # ---------------------------------------------------------------------------
 # Fetch cache (in-memory LRU with TTL)
@@ -53,8 +47,6 @@ async def _fetch_url(url, timeout=30):
     Returns (body_bytes, content_type) or (None, error_string) on failure.
     Enforces: scheme validation, size cap, binary detection, redirect safety, caching.
     """
-    from . import search as s
-
     # Check cache first
     async with _fetch_cache_lock:
         cached_entry = _fetch_cache.get(url)
@@ -69,7 +61,7 @@ async def _fetch_url(url, timeout=30):
         return None, str(e)
 
     try:
-        resp = await s._open_with_fallback(
+        resp = await _open_with_fallback(
             "GET", url, timeout=timeout,
             headers={"User-Agent": "Mozilla/5.0 (compatible; pivot-web-search/1.0)"})
         ct = resp.headers.get("content-type", "")
@@ -100,7 +92,7 @@ async def _fetch_url(url, timeout=30):
 
         return body, ct
 
-    except s.CrossHostRedirect as e:
+    except CrossHostRedirect as e:
         return None, f"cross-host redirect blocked; re-request with: {e.location}"
     except httpx.HTTPStatusError as e:
         log(f"fetch HTTP {e.response.status_code} for {url}")
@@ -199,8 +191,7 @@ async def extract_trafilatura(urls):
     async def _extract_one(url):
         """Fetch and extract a single URL. Returns (url, text, error)."""
         try:
-            from . import search as s
-            raw, ct_or_err = await s._fetch_url(url)
+            raw, ct_or_err = await _fetch_url(url)
             if raw is None:
                 return (url, None, ct_or_err)
             html = raw.decode("utf-8", errors="replace")
@@ -249,7 +240,7 @@ async def extract_tavily(urls, extract_depth="advanced", fmt="markdown", timeout
     Returns same shape as extract_trafilatura: {"results": [...], "failed_results": [...]}.
     Each result has "url" and "raw_content" keys.
     """
-    key = _load_tavily_key()
+    key = _load_env_key("TAVILY_API_KEY")
     if not key:
         return {"results": [], "failed_results": [{"url": u, "error": "no TAVILY_API_KEY"} for u in urls]}
 
@@ -266,8 +257,7 @@ async def extract_tavily(urls, extract_depth="advanced", fmt="markdown", timeout
 
     data = json.dumps(payload).encode("utf-8")
     try:
-        from . import search as s
-        resp = await s._open_with_fallback(
+        resp = await _open_with_fallback(
             "POST", TAVILY_EXTRACT_URL,
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
             data=data, timeout=max(timeout + 5, 35))

@@ -15,7 +15,7 @@ from pivot_web_search_mcp.routing import (
     CircuitBreaker,
     ScoredProvider,
     _CallCounter,
-    _FailureInfo,
+    FailureInfo,
     build_priority_groups,
     execute_search,
     pick_recovery_candidate,
@@ -268,12 +268,12 @@ class TestPriorityGrouping:
 
 class TestSmartDefaults:
     def test_default_priorities(self):
-        assert SMART_DEFAULT_PRIORITY["tavily"] == 10
-        assert SMART_DEFAULT_PRIORITY["brave"] == 10
+        assert SMART_DEFAULT_PRIORITY["llm_search"] == 10
+        assert SMART_DEFAULT_PRIORITY["tavily"] == 20
+        assert SMART_DEFAULT_PRIORITY["brave"] == 20
         assert SMART_DEFAULT_PRIORITY["searxng"] == 30
         assert SMART_DEFAULT_PRIORITY["json_api"] == 30
         assert SMART_DEFAULT_PRIORITY["gemini"] == 40
-        assert SMART_DEFAULT_PRIORITY["llm_search"] == 60
         assert SMART_DEFAULT_PRIORITY["ddg"] == 90
 
     def test_default_timeouts(self):
@@ -301,7 +301,7 @@ class TestExecuteSearch:
         b = CircuitBreaker()
         result = await execute_search("python tutorial", 5, providers, b)
         assert result is not None
-        assert not isinstance(result, _FailureInfo)
+        assert not isinstance(result, FailureInfo)
         assert result.provider == "tavily"
 
     async def test_falls_through_on_empty_result(self):
@@ -311,7 +311,7 @@ class TestExecuteSearch:
         ]
         b = CircuitBreaker()
         result = await execute_search("test query", 5, providers, b)
-        assert not isinstance(result, _FailureInfo)
+        assert not isinstance(result, FailureInfo)
         assert result.provider == "good"
 
     async def test_returns_failure_info_when_all_fail(self):
@@ -321,7 +321,7 @@ class TestExecuteSearch:
         ]
         b = CircuitBreaker()
         result = await execute_search("test", 5, providers, b)
-        assert isinstance(result, _FailureInfo)
+        assert isinstance(result, FailureInfo)
 
     async def test_timeout_triggers_failover(self):
         providers = [
@@ -331,7 +331,7 @@ class TestExecuteSearch:
         ]
         b = CircuitBreaker()
         result = await execute_search("test", 5, providers, b)
-        assert not isinstance(result, _FailureInfo)
+        assert not isinstance(result, FailureInfo)
         assert result.provider == "fast"
 
     async def test_exception_triggers_failover(self):
@@ -341,7 +341,7 @@ class TestExecuteSearch:
         ]
         b = CircuitBreaker()
         result = await execute_search("test", 5, providers, b)
-        assert not isinstance(result, _FailureInfo)
+        assert not isinstance(result, FailureInfo)
         assert result.provider == "ok"
 
     async def test_returns_best_partial_when_no_accept(self):
@@ -356,7 +356,7 @@ class TestExecuteSearch:
         b = CircuitBreaker()
         result = await execute_search("quantum physics", 5, providers, b)
         assert result is not None
-        assert not isinstance(result, _FailureInfo)
+        assert not isinstance(result, FailureInfo)
         assert result.provider == "partial"
 
     async def test_hedged_same_priority_first_wins(self):
@@ -387,8 +387,55 @@ class TestExecuteSearch:
         for _ in range(CB_CONSECUTIVE_THRESHOLD):
             b.record_failure("solo")
         result = await execute_search("test", 5, providers, b)
-        assert not isinstance(result, _FailureInfo)
+        assert not isinstance(result, FailureInfo)
         assert result.provider == "solo"
+
+    async def test_tcp_failure_aborts_after_two_groups(self):
+        """Two consecutive TCP-level failures should short-circuit (no network)."""
+        import httpx
+        providers = [
+            FakeProvider("a", provider_type="tavily", priority=10,
+                         search_error=httpx.ConnectError("DNS down")),
+            FakeProvider("b", provider_type="brave", priority=20,
+                         search_error=httpx.ConnectError("DNS down")),
+            FakeProvider("c", provider_type="ddg", priority=30,
+                         search_result=make_result(3, "c")),
+        ]
+        b = CircuitBreaker()
+        result = await execute_search("test", 5, providers, b)
+        assert isinstance(result, FailureInfo)
+        # Provider c is never tried — short-circuited after 2 tcp_failures
+        assert all(f["provider"] != "c" for f in result.failures)
+        assert sum(1 for f in result.failures if f["error"] == "tcp_failure") == 2
+
+    async def test_tcp_failure_resets_on_success(self):
+        """TCP failure followed by success should reset the streak counter."""
+        import httpx
+        providers = [
+            FakeProvider("a", provider_type="tavily", priority=10,
+                         search_error=httpx.ConnectError("DNS down")),
+            FakeProvider("b", provider_type="brave", priority=20,
+                         search_result=make_result(3, "b")),
+        ]
+        b = CircuitBreaker()
+        result = await execute_search("test", 5, providers, b)
+        assert not isinstance(result, FailureInfo)
+        assert result.provider == "b"
+
+    async def test_call_counter_only_on_success(self):
+        """DC2: failed attempts should NOT increment call_counter."""
+        from pivot_web_search_mcp.routing import _call_counter
+        _call_counter.reset()
+        providers = [
+            FakeProvider("flaky", priority=10,
+                         search_error=RuntimeError("boom")),
+            FakeProvider("ok", priority=20,
+                         search_result=make_result(3, "ok")),
+        ]
+        b = CircuitBreaker()
+        await execute_search("test", 5, providers, b)
+        assert _call_counter.value("flaky") == 0
+        assert _call_counter.value("ok") == 1
 
 
 # ---------------------------------------------------------------------------

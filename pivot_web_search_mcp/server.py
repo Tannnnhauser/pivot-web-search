@@ -16,29 +16,24 @@ import json
 import os
 import re as _re
 import urllib.parse
-from dataclasses import dataclass, field
 
 from fastmcp import FastMCP
 
 from . import quota as _quota
-from . import search
-from .logging import log
-from .providers import (
-    ProviderRegistry,
-    SearchResult,
+from .backends import search_brave_llm_context
+from .config import (
     get_fetch_config_source,
     get_proxy_config_source,
+    load_fetch_config,
     load_proxies,
     reload_proxies,
 )
-from .routing import CircuitBreaker, execute_search, select_providers
-from .search import dedup_and_rank
-
-
-@dataclass
-class _FailureInfo:
-    """Carries per-provider failure details when all providers fail."""
-    failures: list = field(default_factory=list)
+from .extraction import extract_trafilatura
+from .logging import log
+from .providers import ProviderRegistry, SearchResult
+from .results import dedup_and_rank, to_markdown
+from .routing import CircuitBreaker, FailureInfo, ScoredProvider, _attempt_single, execute_search, select_providers
+from .validation import MAX_CONTENT_CHARS, validate_url
 
 
 def _redact_proxy_url(url):
@@ -69,6 +64,10 @@ def _build_instructions():
 # Global registry — initialized once, auto-reloads on config change
 _registry = ProviderRegistry()
 _registry.load()
+
+_enabled = [p for p in _registry.get_ordered() if p.enabled]
+log(f"Pivot Web Search loaded: {len(_enabled)} providers enabled "
+    f"({', '.join(p.name for p in _enabled) if _enabled else 'none'})")
 
 mcp = FastMCP("pivot-web-search", instructions=_build_instructions())
 
@@ -115,48 +114,32 @@ _breaker = CircuitBreaker()
 async def _search_with_registry(query, max_results, provider_name="auto", **kwargs):
     """Run search through the provider registry with failover.
 
-    Explicit provider: direct execution with timeout and health check.
+    Explicit provider: direct attempt with health check, no quality gate.
     Auto mode: priority-group execution with hedging and quality gate.
-    Returns SearchResult, _FailureInfo (all failed), or None.
+    Returns SearchResult, FailureInfo (all failed), or None.
     """
     if provider_name and provider_name != "auto":
         p = _registry.get_by_name(provider_name)
         if not p:
-            return _FailureInfo(failures=[{"provider": provider_name, "error": f"unknown provider '{provider_name}'"}])
+            return FailureInfo(failures=[{"provider": provider_name, "error": f"unknown provider '{provider_name}'"}])
         if not p.enabled:
-            return _FailureInfo(failures=[{"provider": provider_name, "error": "provider is disabled"}])
+            return FailureInfo(failures=[{"provider": provider_name, "error": "provider is disabled"}])
         ok, detail = await p.health_check()
         if not ok:
-            return _FailureInfo(failures=[{"provider": provider_name, "error": detail or "health check failed"}])
-        try:
-            result = await asyncio.wait_for(
-                p.search(query, max_results, **kwargs),
-                timeout=p.timeout_seconds,
-            )
-        except asyncio.TimeoutError:
-            _breaker.record_failure(p.name)
-            return _FailureInfo(failures=[{"provider": p.name, "error": f"timed out after {p.timeout_seconds}s"}])
-        except Exception as e:
-            _breaker.record_failure(p.name)
-            return _FailureInfo(failures=[{"provider": p.name, "error": str(e)}])
-        if result is not None:
-            _quota.record_usage(p.name)
-            _breaker.record_success(p.name)
-        else:
-            _breaker.record_failure(p.name)
-        return result
+            return FailureInfo(failures=[{"provider": provider_name, "error": detail or "health check failed"}])
+
+        scored = ScoredProvider(provider=p, effective_priority=0, call_counter=0, rr_seed=0)
+        attempt = await _attempt_single(scored, query, max_results, _breaker, **kwargs)
+        if attempt.result is not None:
+            return attempt.result
+        return FailureInfo(failures=[{"provider": p.name, "error": attempt.error or "unknown"}])
 
     # Auto mode: delegate to routing engine
     affinity = kwargs.pop("affinity", "general")
-    result = await execute_search(
+    return await execute_search(
         query, max_results, _registry.get_ordered(), _breaker,
         affinity=affinity, **kwargs,
     )
-    # Convert routing._FailureInfo to server._FailureInfo
-    from .routing import _FailureInfo as _RoutingFailure
-    if isinstance(result, _RoutingFailure):
-        return _FailureInfo(failures=result.failures)
-    return result
 
 
 async def _search_super_with_registry(query, max_results, **kwargs):
@@ -334,7 +317,7 @@ async def WebSearch(
         if include_content and not news:
             freshness_map = {"d": "pd", "w": "pw", "m": "pm", "y": "py"}
             freshness = freshness_map.get(search_kwargs.get("timelimit", ""))
-            llm_result = await search.search_brave_llm_context(
+            llm_result = await search_brave_llm_context(
                 query, max_results=max_results,
                 max_tokens=max_content_tokens,
                 freshness=freshness,
@@ -365,8 +348,8 @@ async def WebSearch(
             max_results = max(1, min(max_results, 10))
             sr = await _search_with_registry(query, max_results, provider, **search_kwargs)
 
-        if sr is None or isinstance(sr, _FailureInfo) or not sr.results:
-            failures = sr.failures if isinstance(sr, _FailureInfo) else []
+        if sr is None or isinstance(sr, FailureInfo) or not sr.results:
+            failures = sr.failures if isinstance(sr, FailureInfo) else []
             return json.dumps({
                 "error": "All providers failed",
                 "query": query,
@@ -374,7 +357,7 @@ async def WebSearch(
                 "suggestions": _build_failure_suggestions(failures),
             }, indent=2)
 
-        return search.to_markdown(sr.results, query, sr.answer, sr.provider)
+        return to_markdown(sr.results, query, sr.answer, sr.provider)
 
     except Exception as e:
         return json.dumps({"error": str(e), "query": query})
@@ -404,7 +387,6 @@ async def WebFetch(
         max_chars: Override default content truncation limit (default: from config or 100K)
     """
     from . import fetch as _fetch
-    from .providers import load_fetch_config
 
     # Normalize to list
     urls = url if isinstance(url, list) else [url]
@@ -417,19 +399,19 @@ async def WebFetch(
         if not u or not u.strip():
             continue
         try:
-            validated.append(search.validate_url(u))
+            validated.append(validate_url(u))
         except ValueError as e:
             if len(urls) == 1:
                 return json.dumps({"error": str(e), "url": u})
             validated.append(None)
 
     fetch_config = load_fetch_config()
-    truncation_limit = max_chars if max_chars else fetch_config.get("max_chars", search.MAX_CONTENT_CHARS)
+    truncation_limit = max_chars if max_chars else fetch_config.get("max_chars", MAX_CONTENT_CHARS)
     empty_threshold = fetch_config.get("empty_threshold", 200)
 
     try:
         valid_urls = [u for u in validated if u]
-        result = await search.extract_trafilatura(valid_urls)
+        result = await extract_trafilatura(valid_urls)
 
         extracted = {r["url"]: r["raw_content"] for r in result.get("results", []) if r.get("raw_content")}
         failed_urls = {f["url"] for f in result.get("failed_results", [])}

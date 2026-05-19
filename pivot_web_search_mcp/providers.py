@@ -6,47 +6,31 @@ Provides:
   - SearchProvider: base class for all adapters
   - Built-in adapters: Ddg, Tavily, Brave, Gemini, Searxng, JsonApi
   - ProviderRegistry: config-driven provider management with mtime reload
-  - load_proxies(): config-driven proxy list with mtime reload
 """
 
 import json
 import os
 import pathlib
 import re
-import threading
-import time
 import urllib.parse
 from dataclasses import dataclass, field
 
+from . import quota
+from .backends import search_brave, search_ddg, search_tavily
+from .config import (  # noqa: F401 — re-exported for tests/back-compat
+    PROVIDERS_YAML as _PROVIDERS_YAML,
+    get_fetch_config_source,
+    get_proxy_config_source,
+    load_fetch_config,
+    load_proxies,
+    load_yaml as _load_yaml,
+    reload_fetch_config,
+    reload_proxies,
+)
+from .defaults import DEFAULT_TIMEOUT, SMART_DEFAULT_PRIORITY
+from .http_client import _get_client, _open_with_fallback
 from .logging import log
 from .validation import _load_env_key
-
-# ---------------------------------------------------------------------------
-# Config paths — resolved relative to the project root (parent of pivot_web_search_mcp/)
-# ---------------------------------------------------------------------------
-
-_PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
-_PROVIDERS_YAML = _PROJECT_ROOT / "config" / "providers.yaml"
-_PROXIES_YAML = _PROJECT_ROOT / "config" / "proxies.yaml"
-
-# ---------------------------------------------------------------------------
-# YAML loader — PyYAML required
-# ---------------------------------------------------------------------------
-
-try:
-    import yaml  # noqa: F401
-    _HAS_YAML = True
-except ImportError:
-    _HAS_YAML = False
-
-
-def _load_yaml(path):
-    """Load a YAML file. Raises RuntimeError if PyYAML is missing."""
-    if not _HAS_YAML:
-        raise RuntimeError(f"PyYAML is required to load {path} — run: uv sync")
-    import yaml as _yaml
-    with open(path, "r") as f:
-        return _yaml.safe_load(f)
 
 # ---------------------------------------------------------------------------
 # SearchResult
@@ -96,7 +80,6 @@ class SearchProvider:
     @property
     def timeout_seconds(self) -> float:
         """Per-provider timeout in seconds."""
-        from .routing import DEFAULT_TIMEOUT
         explicit = self.config.get("timeout")
         if explicit is not None:
             return float(explicit)
@@ -121,8 +104,7 @@ class DdgProvider(SearchProvider):
     provider_type = "ddg"
 
     async def search(self, query, max_results=5, **kwargs):
-        from . import search as s
-        results = await s.search_ddg(
+        results = await search_ddg(
             query, max_results,
             region=kwargs.get("region", "wt-wt"),
             timelimit=kwargs.get("timelimit"),
@@ -136,8 +118,7 @@ class DdgProvider(SearchProvider):
         try:
             from ddgs import DDGS  # noqa: F401
 
-            from . import search as s
-            client = await s._get_client()
+            client = await _get_client()
             resp = await client.head("https://duckduckgo.com/", timeout=3.0)
             resp.raise_for_status()
             return True, None
@@ -155,8 +136,7 @@ class TavilyProvider(SearchProvider):
         return _load_env_key(env_var)
 
     async def search(self, query, max_results=5, **kwargs):
-        from . import search as s
-        tv = await s.search_tavily(
+        tv = await search_tavily(
             query, max_results,
             include_answer=kwargs.get("include_answer", False),
             search_depth=kwargs.get("search_depth", "basic"),
@@ -183,16 +163,11 @@ class BraveProvider(SearchProvider):
         return _load_env_key(env_var)
 
     async def search(self, query, max_results=5, **kwargs):
-        from . import search as s
-        rv = await s.search_brave(query, max_results)
+        rv = await search_brave(query, max_results)
         if rv is None:
             return None
         results, resp_headers = rv
-        try:
-            from . import quota
-            quota.update_from_brave_headers(resp_headers)
-        except Exception:
-            pass
+        quota.update_from_brave_headers(resp_headers)
         return SearchResult(results=results, provider=self.name)
 
     async def health_check(self):
@@ -251,8 +226,7 @@ class LlmSearchProvider(SearchProvider):
         timeout = self.config.get("timeout", 30)
 
         try:
-            from . import search as s
-            resp = await s._open_with_fallback(
+            resp = await _open_with_fallback(
                 "POST", endpoint, headers=headers, data=body, timeout=timeout)
 
             if resp.status_code >= 400:
@@ -339,8 +313,7 @@ class SearxngProvider(SearchProvider):
         })
         url = f"{endpoint}?{params}"
         try:
-            from . import search as s
-            resp = await s._open_with_fallback(
+            resp = await _open_with_fallback(
                 "GET", url,
                 headers={"Accept": "application/json", "User-Agent": "pivot-web-search/1.0"},
                 timeout=10)
@@ -358,8 +331,7 @@ class SearxngProvider(SearchProvider):
         if not endpoint:
             return False, "no endpoint"
         try:
-            from . import search as s
-            client = await s._get_client()
+            client = await _get_client()
             resp = await client.head(endpoint, timeout=3.0)
             resp.raise_for_status()
             return True, None
@@ -431,8 +403,7 @@ class JsonApiProvider(SearchProvider):
             endpoint = f"{endpoint}?{qs}"
 
         try:
-            from . import search as s
-            resp = await s._open_with_fallback(
+            resp = await _open_with_fallback(
                 method, endpoint, headers=headers, data=data, timeout=15)
             obj = resp.json()
 
@@ -494,13 +465,6 @@ _DEFAULT_PROVIDERS = [
     {"name": "tavily", "type": "tavily", "enabled": True, "priority": 20, "api_key_env": "TAVILY_API_KEY"},
     {"name": "brave", "type": "brave", "enabled": True, "priority": 30, "api_key_env": "BRAVE_API_KEY"},
     {"name": "gemini", "type": "gemini", "enabled": True, "priority": 40, "api_key_env": "GEMINI_SEARCH_API_KEY"},
-]
-
-# Default proxies (used when no config file exists)
-_DEFAULT_PROXIES = [
-    {"name": "direct", "url": None, "enabled": True, "priority": 1},
-    {"name": "myproxy1", "url": "http://myproxy1.example:8080", "enabled": False, "priority": 2},
-    {"name": "myproxy2", "url": "http://myproxy2.example:8080", "enabled": False, "priority": 3},
 ]
 
 # ---------------------------------------------------------------------------
@@ -589,8 +553,6 @@ class ProviderRegistry:
 
     def _apply_smart_defaults(self, providers):
         """Assign effective_priority based on provider type when not explicitly set."""
-        from .routing import SMART_DEFAULT_PRIORITY
-
         enabled_types = {p.provider_type for p in providers if p.enabled}
         free_only = enabled_types <= {"ddg", "searxng"} and not any(
             p.config.get("api_key_env") for p in providers if p.enabled
@@ -657,201 +619,3 @@ class ProviderRegistry:
             return {"source": "yaml", "path": str(self._config_path)}
         return {"source": "default"}
 
-
-# ---------------------------------------------------------------------------
-# Proxy config loader (kept sync — reads tiny YAML files from disk)
-# ---------------------------------------------------------------------------
-
-_proxies_mtime = 0
-_proxies_list = None  # list of proxy URL strings (None = direct)
-_proxies_lock = threading.Lock()
-
-
-def _load_proxies_from_env():
-    """Parse PIVOT_WEB_SEARCH_PROXIES env var into a proxy URL list.
-
-    Returns list or None if env var is not set.
-    Maps 'direct' → None (no proxy).
-    """
-    raw = os.environ.get("PIVOT_WEB_SEARCH_PROXIES", "").strip()
-    if not raw:
-        return None
-    result = []
-    for entry in raw.split(","):
-        entry = entry.strip()
-        if not entry:
-            continue
-        if entry.lower() == "direct":
-            result.append(None)
-        else:
-            result.append(entry)
-    return result if result else None
-
-
-def load_proxies(config_path=None):
-    """Load proxy list from env var, YAML config, or defaults (in that priority).
-
-    Returns list of proxy URLs (None = direct connection).
-    Uses mtime-based caching — cheap to call on every request.
-    """
-    global _proxies_mtime, _proxies_list
-
-    path = pathlib.Path(config_path) if config_path else _PROXIES_YAML
-
-    with _proxies_lock:
-        # Fast path: return cached list if config hasn't changed
-        if _proxies_list is not None:
-            try:
-                if path.exists():
-                    mtime = path.stat().st_mtime
-                    if mtime <= _proxies_mtime:
-                        return _proxies_list
-                else:
-                    return _proxies_list
-            except Exception:
-                return _proxies_list
-
-        env_proxies = _load_proxies_from_env()
-        if env_proxies is not None:
-            _proxies_list = env_proxies
-            _proxies_mtime = time.time()
-            log(f"Loaded {len(env_proxies)} proxies from env PIVOT_WEB_SEARCH_PROXIES")
-            return _proxies_list
-
-        if path.exists():
-            try:
-                data = _load_yaml(str(path))
-                _proxies_mtime = path.stat().st_mtime
-                entries = data.get("proxies", [])
-                if not isinstance(entries, list):
-                    raise ValueError("'proxies' must be a list")
-                sorted_entries = sorted(
-                    [e for e in entries if e.get("enabled", True)],
-                    key=lambda e: e.get("priority", 100),
-                )
-                result = []
-                for e in sorted_entries:
-                    url = e.get("url")
-                    if url and url.startswith("socks5://"):
-                        try:
-                            import socks  # type: ignore[import-not-found]  # noqa: F401
-                            result.append(url)
-                        except ImportError:
-                            log(f"SOCKS5 proxy '{e.get('name', '?')}' skipped — install with: uv pip install pysocks")
-                            continue
-                    else:
-                        result.append(url)
-                _proxies_list = result
-                log(f"Loaded {len(result)} proxies from {path}")
-                return result
-            except Exception as e:
-                log(f"Failed to load {path}: {e} — using defaults")
-
-        _proxies_list = [e["url"] for e in _DEFAULT_PROXIES if e.get("enabled", True)]
-        _proxies_mtime = time.time()
-        return _proxies_list
-
-
-def reload_proxies():
-    """Force re-read proxy config."""
-    global _proxies_list, _proxies_mtime
-    _proxies_list = None
-    _proxies_mtime = 0
-    return load_proxies()
-
-
-def get_proxy_config_source():
-    """Return source metadata for proxy configuration."""
-    raw = os.environ.get("PIVOT_WEB_SEARCH_PROXIES", "").strip()
-    if raw:
-        return {"source": "env", "env_var": "PIVOT_WEB_SEARCH_PROXIES", "value": raw}
-    if _PROXIES_YAML.exists():
-        return {"source": "yaml", "path": str(_PROXIES_YAML)}
-    return {"source": "default"}
-
-
-# ---------------------------------------------------------------------------
-# Fetch config loader (kept sync — reads tiny YAML files from disk)
-# ---------------------------------------------------------------------------
-
-_FETCH_YAML = _PROJECT_ROOT / "config" / "fetch.yaml"
-_fetch_config = None
-_fetch_config_mtime = 0
-_fetch_config_lock = threading.Lock()
-
-_DEFAULT_FETCH_CONFIG = {
-    "js_renderer": "none",
-    "max_chars": 100_000,
-    "empty_threshold": 200,
-    "playwright": {"timeout": 30000, "wait_until": "networkidle"},
-    "tavily": {"extract_depth": "advanced", "format": "markdown", "timeout": 30},
-}
-
-
-def load_fetch_config(config_path=None):
-    """Load fetch config from env var, YAML config, or defaults (in that priority).
-
-    Returns dict with fetch configuration.
-    Uses mtime-based caching — cheap to call on every request.
-    """
-    global _fetch_config_mtime, _fetch_config
-
-    path = pathlib.Path(config_path) if config_path else _FETCH_YAML
-
-    if _fetch_config is not None:
-        try:
-            if path.exists():
-                mtime = path.stat().st_mtime
-                if mtime <= _fetch_config_mtime:
-                    return _fetch_config
-            else:
-                return _fetch_config
-        except Exception:
-            return _fetch_config
-
-    with _fetch_config_lock:
-        if _fetch_config is not None:
-            return _fetch_config
-
-        env_raw = os.environ.get("PIVOT_WEB_SEARCH_FETCH_CONFIG", "").strip()
-        if env_raw:
-            try:
-                parsed = json.loads(env_raw)
-                _fetch_config = {**_DEFAULT_FETCH_CONFIG, **parsed}
-                _fetch_config_mtime = time.time()
-                return _fetch_config
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        if path.exists():
-            try:
-                data = _load_yaml(str(path))
-                _fetch_config_mtime = path.stat().st_mtime
-                # Support both `fetch:` nested and top-level flat formats
-                loaded = data.get("fetch", {}) if isinstance(data, dict) and "fetch" in data else (data or {})
-                _fetch_config = {**_DEFAULT_FETCH_CONFIG, **loaded}
-                return _fetch_config
-            except Exception as e:
-                log(f"Failed to load {path}: {e} — using defaults")
-
-        _fetch_config = dict(_DEFAULT_FETCH_CONFIG)
-        _fetch_config_mtime = time.time()
-        return _fetch_config
-
-
-def get_fetch_config_source():
-    """Return source metadata for fetch configuration."""
-    raw = os.environ.get("PIVOT_WEB_SEARCH_FETCH_CONFIG", "").strip()
-    if raw:
-        return {"source": "env", "env_var": "PIVOT_WEB_SEARCH_FETCH_CONFIG"}
-    if _FETCH_YAML.exists():
-        return {"source": "yaml", "path": str(_FETCH_YAML)}
-    return {"source": "default"}
-
-
-def reload_fetch_config():
-    """Force re-read fetch config."""
-    global _fetch_config, _fetch_config_mtime
-    _fetch_config = None
-    _fetch_config_mtime = 0
-    return load_fetch_config()

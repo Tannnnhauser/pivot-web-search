@@ -403,7 +403,7 @@ class TestLlmSearchProvider:
             "model": "test-model",
         })
 
-        with patch("pivot_web_search_mcp.search._open_with_fallback", new_callable=AsyncMock) as mock_fetch:
+        with patch("pivot_web_search_mcp.providers._open_with_fallback", new_callable=AsyncMock) as mock_fetch:
             mock_fetch.return_value = mock_resp
             result = await p.search("test query")
 
@@ -425,7 +425,7 @@ class TestLlmSearchProvider:
             "model": "m",
         })
 
-        with patch("pivot_web_search_mcp.search._open_with_fallback", new_callable=AsyncMock) as mock_fetch:
+        with patch("pivot_web_search_mcp.providers._open_with_fallback", new_callable=AsyncMock) as mock_fetch:
             mock_fetch.return_value = mock_resp
             result = await p.search("query")
 
@@ -448,7 +448,7 @@ class TestLlmSearchProvider:
         })
 
         with patch.dict("os.environ", {"TEST_LLM_KEY": "sk-test123"}):
-            with patch("pivot_web_search_mcp.search._open_with_fallback", new_callable=AsyncMock) as mock_fetch:
+            with patch("pivot_web_search_mcp.providers._open_with_fallback", new_callable=AsyncMock) as mock_fetch:
                 mock_fetch.return_value = mock_resp
                 await p.search("query")
                 call_kwargs = mock_fetch.call_args
@@ -530,7 +530,7 @@ class TestGeminiProviderRefactored:
 
         p = GeminiProvider("gemini", config={})
         with patch.dict("os.environ", {"GEMINI_SEARCH_API_KEY": "test-key"}, clear=False):
-            with patch("pivot_web_search_mcp.search._open_with_fallback", new_callable=AsyncMock) as mock_fetch:
+            with patch("pivot_web_search_mcp.providers._open_with_fallback", new_callable=AsyncMock) as mock_fetch:
                 mock_fetch.return_value = mock_resp
                 result = await p.search("test query")
 
@@ -556,7 +556,7 @@ class TestGeminiProviderRefactored:
 
         p = GeminiProvider("gemini", config={})
         with patch.dict("os.environ", {"GEMINI_SEARCH_API_KEY": "my-key"}, clear=False):
-            with patch("pivot_web_search_mcp.search._open_with_fallback", new_callable=AsyncMock) as mock_fetch:
+            with patch("pivot_web_search_mcp.providers._open_with_fallback", new_callable=AsyncMock) as mock_fetch:
                 mock_fetch.return_value = mock_resp
                 await p.search("q")
                 call_kwargs = mock_fetch.call_args
@@ -572,7 +572,7 @@ class TestGeminiProviderRefactored:
 
         p = GeminiProvider("gemini", config={})
         with patch.dict("os.environ", {"GEMINI_SEARCH_API_KEY": "key"}, clear=False):
-            with patch("pivot_web_search_mcp.search._open_with_fallback", new_callable=AsyncMock) as mock_fetch:
+            with patch("pivot_web_search_mcp.providers._open_with_fallback", new_callable=AsyncMock) as mock_fetch:
                 mock_fetch.return_value = mock_resp
                 result = await p.search("query")
 
@@ -708,7 +708,7 @@ class TestRegressionFixes:
             "model": "m",
         })
 
-        with patch("pivot_web_search_mcp.search._open_with_fallback", new_callable=AsyncMock) as mock_fetch:
+        with patch("pivot_web_search_mcp.providers._open_with_fallback", new_callable=AsyncMock) as mock_fetch:
             mock_fetch.return_value = mock_resp
             result = await p.search("query")
 

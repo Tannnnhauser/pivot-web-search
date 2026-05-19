@@ -64,7 +64,7 @@ class TestSearchWithRegistry:
             FakeProvider("fail2", None, priority=20),
         ]
         sr = await server._search_with_registry("test", 5)
-        assert isinstance(sr, server._FailureInfo)
+        assert isinstance(sr, server.FailureInfo)
         assert len(sr.failures) == 2
         assert sr.failures[0]["provider"] == "fail1"
         assert sr.failures[1]["provider"] == "fail2"
@@ -81,7 +81,7 @@ class TestSearchWithRegistry:
     async def test_specific_provider_not_found(self, mock_get):
         mock_get.return_value = None
         sr = await server._search_with_registry("test", 5, provider_name="nonexistent")
-        assert isinstance(sr, server._FailureInfo)
+        assert isinstance(sr, server.FailureInfo)
         assert "unknown provider" in sr.failures[0]["error"]
 
     @patch.object(server._registry, 'get_by_name')
@@ -89,7 +89,7 @@ class TestSearchWithRegistry:
         provider = FakeProvider("tavily", _make_results(3), enabled=False)
         mock_get.return_value = provider
         sr = await server._search_with_registry("test", 5, provider_name="tavily")
-        assert isinstance(sr, server._FailureInfo)
+        assert isinstance(sr, server.FailureInfo)
         assert "disabled" in sr.failures[0]["error"]
 
     @patch.object(server._registry, 'get_by_name')
@@ -98,7 +98,7 @@ class TestSearchWithRegistry:
         provider.health_check = AsyncMock(return_value=(False, "no API key"))  # type: ignore[method-assign]
         mock_get.return_value = provider
         sr = await server._search_with_registry("test", 5, provider_name="tavily")
-        assert isinstance(sr, server._FailureInfo)
+        assert isinstance(sr, server.FailureInfo)
         assert "no API key" in sr.failures[0]["error"]
 
     @patch.object(server._registry, 'get_ordered')

@@ -10,10 +10,10 @@ Backends:
 """
 
 import asyncio
-import os
 import re
 from typing import Literal
 
+from .extraction import extract_tavily
 from .logging import log
 
 _SPA_SHELL_PATTERNS = [
@@ -90,8 +90,7 @@ async def render_tavily(url: str, api_key: str, extract_depth: str = "advanced",
         log("No TAVILY_API_KEY for fetch fallback")
         return None
 
-    from . import search
-    result = await search.extract_tavily(
+    result = await extract_tavily(
         [url], extract_depth=extract_depth, fmt=fmt, timeout=timeout,
         query=query, chunks_per_source=chunks_per_source,
     )

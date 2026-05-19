@@ -1,6 +1,7 @@
 """Pure function tests — zero mocking, zero network."""
 
 from pivot_web_search_mcp import search
+from pivot_web_search_mcp.validation import _load_env_key
 
 
 class TestValidateUrl:
@@ -110,3 +111,27 @@ class TestToMarkdown:
     def test_empty_results(self):
         md = search.to_markdown([], "query")
         assert isinstance(md, str)
+
+
+class TestLoadEnvKey:
+    """Plan J: standard env var wins over PIVOT_USERCONFIG_*; missing returns None."""
+
+    def test_standard_var_wins(self, monkeypatch):
+        monkeypatch.setenv("TEST_API_KEY", "shell-value")
+        monkeypatch.setenv("PIVOT_USERCONFIG_TEST_API_KEY", "ui-value")
+        assert _load_env_key("TEST_API_KEY") == "shell-value"
+
+    def test_userconfig_fallback(self, monkeypatch):
+        monkeypatch.delenv("TEST_API_KEY", raising=False)
+        monkeypatch.setenv("PIVOT_USERCONFIG_TEST_API_KEY", "ui-value")
+        assert _load_env_key("TEST_API_KEY") == "ui-value"
+
+    def test_missing_returns_none(self, monkeypatch):
+        monkeypatch.delenv("TEST_API_KEY", raising=False)
+        monkeypatch.delenv("PIVOT_USERCONFIG_TEST_API_KEY", raising=False)
+        assert _load_env_key("TEST_API_KEY") is None
+
+    def test_empty_string_treated_as_missing(self, monkeypatch):
+        monkeypatch.setenv("TEST_API_KEY", "   ")
+        monkeypatch.setenv("PIVOT_USERCONFIG_TEST_API_KEY", "ui-value")
+        assert _load_env_key("TEST_API_KEY") == "ui-value"

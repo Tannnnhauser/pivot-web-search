@@ -13,7 +13,7 @@ Claude Code users on **Amazon Bedrock** (or other API providers) don't get Anthr
 ## Key Features
 
 - **Priority-group routing** — providers grouped by priority and executed with hedged requests. Same-priority providers fire concurrently with 200ms stagger; first quality-gate pass wins. Groups tried sequentially from highest to lowest priority.
-- **Smart defaults** — quality-first ordering (Tavily/Brave > SearXNG > Gemini > LLM > DDG) applied automatically. No manual priority tuning needed for common setups.
+- **Smart defaults** — quality-first ordering (LLM Search > Tavily/Brave > SearXNG > Gemini > DDG) applied automatically. No manual priority tuning needed for common setups.
 - **3-tier quality gate** — AI answer presence, URL count, and keyword overlap drive automatic failover decisions. Partial results are kept as fallback while better sources are tried.
 - **Circuit breaker** — per-provider health tracking. After 3 consecutive failures, a provider is temporarily bypassed (60s cooldown) with automatic recovery probing.
 - **Super mode** — queries all providers in parallel, deduplicates by URL, and ranks by cross-provider agreement.
@@ -191,13 +191,13 @@ providers:
   - name: tavily
     type: tavily
     api_key_env: TAVILY_API_KEY
-    # priority: 10 (smart default — hedged with brave)
+    # priority: 20 (smart default — hedged with brave)
     # timeout: 4 (smart default)
 
   - name: brave
     type: brave
     api_key_env: BRAVE_API_KEY
-    # priority: 10 (smart default — hedged with tavily)
+    # priority: 20 (smart default — hedged with tavily)
     # timeout: 4 (smart default)
 
   - name: gemini
@@ -246,10 +246,10 @@ latency:
 
 | Type | Priority | Timeout |
 |---|---|---|
-| `tavily` / `brave` | 10 | 4s |
+| `llm_search` | 10 | 15s |
+| `tavily` / `brave` | 20 | 4s |
 | `searxng` / `json_api` | 30 | 6s |
 | `gemini` | 40 | 20s |
-| `llm_search` | 60 | 15s |
 | `ddg` | 90 | 6s |
 
 ### LLM Search Providers (`type: llm_search`)
@@ -342,10 +342,10 @@ Set `js_renderer: playwright` for JavaScript-heavy sites (requires `uv sync --ex
 Request
   │
   ├─ normal mode: priority-group routing
-  │   ┌─ Group 1 (priority 10): Tavily + Brave ← hedged (200ms stagger, first quality-gate pass wins)
-  │   ├─ Group 2 (priority 30): SearXNG / json_api
-  │   ├─ Group 3 (priority 40): Gemini
-  │   ├─ Group 4 (priority 60): LLM Search (Perplexity, OpenAI, etc.)
+  │   ┌─ Group 1 (priority 10): LLM Search (Perplexity, OpenAI, etc.)
+  │   ├─ Group 2 (priority 20): Tavily + Brave ← hedged (200ms stagger, first quality-gate pass wins)
+  │   ├─ Group 3 (priority 30): SearXNG / json_api
+  │   ├─ Group 4 (priority 40): Gemini
   │   └─ Group 5 (priority 90): DDG (free exhaustion fallback)
   │
   │   Gates: quota-exhausted → skip | circuit-open → skip | affinity mismatch → skip

@@ -14,7 +14,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+import httpx
+
 from . import quota as _quota
+from .defaults import DEFAULT_TIMEOUT, SMART_DEFAULT_PRIORITY  # noqa: F401 — re-exported for callers
 from .logging import log
 from .quality_gate import Verdict, quality_gate
 
@@ -24,28 +27,16 @@ from .quality_gate import Verdict, quality_gate
 
 CB_CONSECUTIVE_THRESHOLD = 3
 CB_COOLDOWN_SECONDS = 60
+CB_RETRY_AFTER_MIN_S = 10
+CB_RETRY_AFTER_MAX_S = 600
 
 HEDGE_DELAY_MS = 200
 
-SMART_DEFAULT_PRIORITY: dict[str, int] = {
-    "tavily": 10,
-    "brave": 10,
-    "searxng": 30,
-    "json_api": 30,
-    "gemini": 40,
-    "llm_search": 60,
-    "ddg": 90,
-}
-
-DEFAULT_TIMEOUT: dict[str, float] = {
-    "brave": 4,
-    "tavily": 4,
-    "ddg": 6,
-    "gemini": 20,
-    "searxng": 6,
-    "json_api": 6,
-    "llm_search": 15,
-}
+# Total search budget: walk through priority groups must finish in under this
+# many seconds (Sec 5B.2). Single-LLM first group can extend by `timeout + 2`
+# (Sec 5B.4) — see `_effective_budget`.
+TOTAL_BUDGET_S = 10.0
+LLM_BUDGET_EXTENSION_S = 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +123,7 @@ class CircuitBreaker:
         entry.state = BreakerState.OPEN
         entry.opened_at = time.time()
         if cooldown_s is not None:
-            entry.cooldown_override = min(max(cooldown_s, 10), 600)
+            entry.cooldown_override = min(max(cooldown_s, CB_RETRY_AFTER_MIN_S), CB_RETRY_AFTER_MAX_S)
         log(f"{name} breaker OPEN immediately (cooldown={self._cooldown_for(entry):.0f}s)")
 
     def time_until_recovery(self, name: str) -> float:
@@ -262,16 +253,31 @@ def build_priority_groups(candidates: list[ScoredProvider]) -> list[list[ScoredP
 # ---------------------------------------------------------------------------
 
 
+def _effective_budget(groups: list[list[ScoredProvider]]) -> float:
+    """Total budget for walking priority groups.
+
+    Sec 5B.4: when the first group is a single LLM provider (slow by nature),
+    extend the budget by that provider's timeout + LLM_BUDGET_EXTENSION_S
+    so we don't abort it mid-flight.
+    """
+    if groups and len(groups[0]) == 1:
+        first = groups[0][0].provider
+        if getattr(first, "provider_type", "") == "llm_search":
+            timeout = getattr(first, "timeout_seconds",
+                              DEFAULT_TIMEOUT.get(first.provider_type, 6))
+            return TOTAL_BUDGET_S + timeout + LLM_BUDGET_EXTENSION_S
+    return TOTAL_BUDGET_S
+
+
 @dataclass
 class _AttemptResult:
     provider_name: str
     result: Any = None  # SearchResult or None
     error: str | None = None
-    is_timeout: bool = False
 
 
 @dataclass
-class _FailureInfo:
+class FailureInfo:
     failures: list = field(default_factory=list)
 
 
@@ -285,7 +291,7 @@ async def execute_search(
 ):
     """Main routing entry: priority-group failover with hedging and quality gate.
 
-    Returns SearchResult, _FailureInfo, or None.
+    Returns SearchResult, FailureInfo, or None.
     """
     candidates = select_providers(providers, breaker, affinity=affinity)
 
@@ -299,14 +305,20 @@ async def execute_search(
                 rr_seed=getattr(recovery, "_rr_seed", 0),
             )]
         else:
-            return _FailureInfo(failures=[{"provider": "all", "error": "all providers unavailable"}])
+            return FailureInfo(failures=[{"provider": "all", "error": "all providers unavailable"}])
 
     groups = build_priority_groups(candidates)
     best_so_far = None
     failures: list[dict] = []
     consecutive_tcp_failures = 0
 
+    deadline = time.time() + _effective_budget(groups)
+
     for group in groups:
+        if time.time() >= deadline:
+            log(f"BUDGET exceeded after {len(failures)} failures, stopping")
+            break
+
         group_result = await _execute_priority_group(group, query, max_results, breaker, **kwargs)
 
         if group_result.error:
@@ -314,7 +326,7 @@ async def execute_search(
             if group_result.error == "tcp_failure":
                 consecutive_tcp_failures += 1
                 if consecutive_tcp_failures >= 2:
-                    return _FailureInfo(failures=failures)
+                    return FailureInfo(failures=failures)
             continue
 
         if group_result.result is None:
@@ -339,7 +351,7 @@ async def execute_search(
 
     if best_so_far is not None:
         return best_so_far
-    return _FailureInfo(failures=failures)
+    return FailureInfo(failures=failures)
 
 
 async def _execute_priority_group(
@@ -380,15 +392,18 @@ async def _attempt_single(
     except asyncio.TimeoutError:
         breaker.record_failure(p.name)
         log(f"{p.name} timed out after {timeout}s")
-        return _AttemptResult(provider_name=p.name, error="timeout", is_timeout=True)
+        return _AttemptResult(provider_name=p.name, error="timeout")
+    except (httpx.ConnectError, httpx.NetworkError, OSError) as e:
+        breaker.record_failure(p.name)
+        log(f"{p.name} tcp failure: {e}")
+        return _AttemptResult(provider_name=p.name, error="tcp_failure")
     except Exception as e:
         breaker.record_failure(p.name)
         log(f"{p.name} error: {e}")
         return _AttemptResult(provider_name=p.name, error=str(e))
 
-    _call_counter.increment(p.name)
-
     if result is not None:
+        _call_counter.increment(p.name)
         breaker.record_success(p.name)
         _quota.record_usage(p.name)
         return _AttemptResult(provider_name=p.name, result=result)

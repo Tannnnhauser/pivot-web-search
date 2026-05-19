@@ -40,7 +40,7 @@ project requirements and team expertise.</p>
 
 
 class TestExtractTrafilatura:
-    @patch("pivot_web_search_mcp.search._fetch_url", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.extraction._fetch_url", new_callable=AsyncMock)
     async def test_single_url_success(self, mock_fetch):
         mock_fetch.return_value = (REAL_ARTICLE_HTML.encode(), "text/html")
         result = await search.extract_trafilatura(["https://example.com"])
@@ -48,7 +48,7 @@ class TestExtractTrafilatura:
         assert "Python" in result["results"][0]["raw_content"]
         assert result["failed_results"] == []
 
-    @patch("pivot_web_search_mcp.search._fetch_url", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.extraction._fetch_url", new_callable=AsyncMock)
     async def test_fetch_failure(self, mock_fetch):
         mock_fetch.return_value = (None, "HTTP 404 Not Found")
         result = await search.extract_trafilatura(["https://bad.com"])
@@ -56,7 +56,7 @@ class TestExtractTrafilatura:
         assert "404" in result["failed_results"][0]["error"]
         assert result["results"] == []
 
-    @patch("pivot_web_search_mcp.search._fetch_url", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.extraction._fetch_url", new_callable=AsyncMock)
     async def test_multiple_urls(self, mock_fetch):
         mock_fetch.side_effect = [
             (REAL_ARTICLE_HTML.encode(), "text/html"),
@@ -66,7 +66,7 @@ class TestExtractTrafilatura:
         assert len(result["results"]) == 1
         assert len(result["failed_results"]) == 1
 
-    @patch("pivot_web_search_mcp.search._fetch_url", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.extraction._fetch_url", new_callable=AsyncMock)
     async def test_nextjs_pages_router_fallback(self, mock_fetch):
         mock_fetch.return_value = (NEXT_DATA_HTML.encode(), "text/html")
         result = await search.extract_trafilatura(["https://spa.com"])
@@ -75,7 +75,7 @@ class TestExtractTrafilatura:
         assert "__NEXT_DATA__" in content
         assert "Test Page" in content
 
-    @patch("pivot_web_search_mcp.search._fetch_url", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.extraction._fetch_url", new_callable=AsyncMock)
     async def test_nuxt_fallback(self, mock_fetch):
         mock_fetch.return_value = (NUXT_DATA_HTML.encode(), "text/html")
         result = await search.extract_trafilatura(["https://nuxt-app.com"])
@@ -84,7 +84,7 @@ class TestExtractTrafilatura:
         assert "__NUXT_DATA__" in content
         assert "Nuxt Page" in content
 
-    @patch("pivot_web_search_mcp.search._fetch_url", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.extraction._fetch_url", new_callable=AsyncMock)
     async def test_empty_spa_fails(self, mock_fetch):
         mock_fetch.return_value = (EMPTY_SPA_HTML.encode(), "text/html")
         result = await search.extract_trafilatura(["https://empty-spa.com"])
@@ -92,7 +92,7 @@ class TestExtractTrafilatura:
         err = result["failed_results"][0]["error"].lower()
         assert "empty" in err or "failed" in err
 
-    @patch("pivot_web_search_mcp.search._fetch_url", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.extraction._fetch_url", new_callable=AsyncMock)
     async def test_rsc_payload_fallback(self, mock_fetch):
         mock_fetch.return_value = (RSC_HTML.encode(), "text/html")
         result = await search.extract_trafilatura(["https://rsc-app.com"])
@@ -100,7 +100,7 @@ class TestExtractTrafilatura:
             content = result["results"][0]["raw_content"]
             assert "RSC" in content or "Article" in content
 
-    @patch("pivot_web_search_mcp.search._fetch_url", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.extraction._fetch_url", new_callable=AsyncMock)
     async def test_returns_dict_never_none(self, mock_fetch):
         mock_fetch.return_value = (None, "connection refused")
         result = await search.extract_trafilatura(["https://x.com"])

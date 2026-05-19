@@ -30,14 +30,6 @@ def _load_env_key(name):
     return val or None
 
 
-def _load_tavily_key():
-    return _load_env_key("TAVILY_API_KEY")
-
-
-def _load_brave_key():
-    return _load_env_key("BRAVE_API_KEY")
-
-
 # ---------------------------------------------------------------------------
 # URL validation
 # ---------------------------------------------------------------------------

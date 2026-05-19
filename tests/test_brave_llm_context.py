@@ -16,7 +16,7 @@ class TestExtractTavily:
         assert len(result["failed_results"]) == 1
         assert "no TAVILY_API_KEY" in result["failed_results"][0]["error"]
 
-    @patch("pivot_web_search_mcp.search._open_with_fallback", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.extraction._open_with_fallback", new_callable=AsyncMock)
     async def test_success(self, mock_open, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "tvly-test123")
         response_data = {
@@ -32,7 +32,7 @@ class TestExtractTavily:
         assert result["results"][0]["raw_content"] == "# Page Title\n\nContent here"
         assert result["failed_results"] == []
 
-    @patch("pivot_web_search_mcp.search._open_with_fallback", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.extraction._open_with_fallback", new_callable=AsyncMock)
     async def test_with_query_and_chunks(self, mock_open, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "tvly-test123")
         response_data = {"results": [{"url": "https://example.com", "raw_content": "chunk1 [...] chunk2"}],
@@ -51,7 +51,7 @@ class TestExtractTavily:
         assert payload["query"] == "python"
         assert payload["chunks_per_source"] == 3
 
-    @patch("pivot_web_search_mcp.search._open_with_fallback", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.extraction._open_with_fallback", new_callable=AsyncMock)
     async def test_partial_failure(self, mock_open, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
         response_data = {
@@ -65,7 +65,7 @@ class TestExtractTavily:
         assert len(result["failed_results"]) == 1
         assert result["failed_results"][0]["error"] == "timeout"
 
-    @patch("pivot_web_search_mcp.search._open_with_fallback", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.extraction._open_with_fallback", new_callable=AsyncMock)
     async def test_network_error(self, mock_open, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
         mock_open.side_effect = Exception("Connection refused")
@@ -80,7 +80,7 @@ class TestSearchBraveLlmContext:
         result = await search.search_brave_llm_context("test query")
         assert result is None
 
-    @patch("pivot_web_search_mcp.search._open_with_fallback", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.backends._open_with_fallback", new_callable=AsyncMock)
     async def test_success(self, mock_open, monkeypatch):
         monkeypatch.setenv("BRAVE_API_KEY", "BSA-test123")
         response_data = {
@@ -117,7 +117,7 @@ class TestSearchBraveLlmContext:
         assert len(results[0]["snippets"]) == 2
         assert "First snippet" in results[0]["snippet"]
 
-    @patch("pivot_web_search_mcp.search._open_with_fallback", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.backends._open_with_fallback", new_callable=AsyncMock)
     async def test_empty_results(self, mock_open, monkeypatch):
         monkeypatch.setenv("BRAVE_API_KEY", "BSA-test")
         response_data = {"grounding": {"generic": []}, "sources": {}}
@@ -126,14 +126,14 @@ class TestSearchBraveLlmContext:
         result = await search.search_brave_llm_context("obscure query")
         assert result is None
 
-    @patch("pivot_web_search_mcp.search._open_with_fallback", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.backends._open_with_fallback", new_callable=AsyncMock)
     async def test_network_error(self, mock_open, monkeypatch):
         monkeypatch.setenv("BRAVE_API_KEY", "BSA-test")
         mock_open.side_effect = Exception("timeout")
         result = await search.search_brave_llm_context("test")
         assert result is None
 
-    @patch("pivot_web_search_mcp.search._open_with_fallback", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.backends._open_with_fallback", new_callable=AsyncMock)
     async def test_params_passed_correctly(self, mock_open, monkeypatch):
         monkeypatch.setenv("BRAVE_API_KEY", "BSA-test")
         response_data = {"grounding": {"generic": [

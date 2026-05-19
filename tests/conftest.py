@@ -1,7 +1,7 @@
 
 import pytest
 
-from pivot_web_search_mcp import extraction, http_client, providers, quota, routing, search, server
+from pivot_web_search_mcp import config, extraction, http_client, providers, quota, routing, search, server
 
 
 @pytest.fixture(autouse=True)
@@ -38,12 +38,16 @@ def _reset_search_caches():
 
 @pytest.fixture(autouse=True)
 def _reset_proxy_config():
-    """Reset providers.py proxy cache between tests."""
-    providers._proxies_list = None
-    providers._proxies_mtime = 0
+    """Reset proxy + fetch config caches between tests."""
+    config._proxies_list = None
+    config._proxies_mtime = 0
+    config._fetch_config = None
+    config._fetch_config_mtime = 0
     yield
-    providers._proxies_list = None
-    providers._proxies_mtime = 0
+    config._proxies_list = None
+    config._proxies_mtime = 0
+    config._fetch_config = None
+    config._fetch_config_mtime = 0
 
 
 @pytest.fixture(autouse=True)

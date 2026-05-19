@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 
 from filelock import FileLock
 
+from .http_client import _open_with_fallback
 from .logging import log
 
 _PACIFIC = ZoneInfo("America/Los_Angeles")
@@ -164,9 +165,19 @@ def record_usage(provider_name):
         if not isinstance(data, dict):
             data = {}
         _ensure_period(data, provider_name)
-        data[provider_name]["used"] = data[provider_name].get("used", 0) + 1
+        prev_used = data[provider_name].get("used", 0)
+        new_used = prev_used + 1
+        data[provider_name]["used"] = new_used
         _QUOTA_FILE.write_text(json.dumps(data, indent=2))
+        limit = data[provider_name].get("limit")
     _quota_cache = None
+
+    # Warn when crossing 80% threshold (one-shot per period).
+    if limit and limit > 0:
+        prev_pct = (prev_used / limit) * 100.0
+        new_pct = (new_used / limit) * 100.0
+        if prev_pct < 80.0 <= new_pct:
+            log(f"WARN {provider_name} quota at {new_pct:.0f}% ({new_used}/{limit})")
 
 
 def update_from_brave_headers(headers):
@@ -244,8 +255,7 @@ async def sync_tavily_usage(api_key=None):
             pass
 
     try:
-        from . import search
-        resp = await search._open_with_fallback(
+        resp = await _open_with_fallback(
             "GET", _TAVILY_USAGE_URL,
             headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
             timeout=10)

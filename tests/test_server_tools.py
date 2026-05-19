@@ -58,7 +58,7 @@ class TestWebSearch:
         parsed = json.loads(result)
         assert "error" in parsed
 
-    @patch("pivot_web_search_mcp.search.search_brave_llm_context", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.server.search_brave_llm_context", new_callable=AsyncMock)
     async def test_include_content_mode(self, mock_llm):
         mock_llm.return_value = (
             [{"title": "Page", "url": "https://p.com", "snippet": "text", "snippets": ["chunk1"]}],
@@ -71,7 +71,7 @@ class TestWebSearch:
 
 class TestWebFetch:
     @patch("pivot_web_search_mcp.fetch.render_with_fallback", new_callable=AsyncMock)
-    @patch("pivot_web_search_mcp.search.extract_trafilatura", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.server.extract_trafilatura", new_callable=AsyncMock)
     async def test_success(self, mock_extract, mock_fallback):
         mock_extract.return_value = {
             "results": [{"url": "https://example.com", "raw_content": "# Content here"}],
@@ -83,7 +83,7 @@ class TestWebFetch:
         assert "example.com" in result
 
     @patch("pivot_web_search_mcp.fetch.render_with_fallback", new_callable=AsyncMock)
-    @patch("pivot_web_search_mcp.search.extract_trafilatura", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.server.extract_trafilatura", new_callable=AsyncMock)
     async def test_extraction_failure(self, mock_extract, mock_fallback):
         mock_extract.return_value = {
             "results": [],
@@ -100,7 +100,7 @@ class TestWebFetch:
         assert "error" in parsed
 
     @patch("pivot_web_search_mcp.fetch.render_with_fallback", new_callable=AsyncMock)
-    @patch("pivot_web_search_mcp.search.extract_trafilatura", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.server.extract_trafilatura", new_callable=AsyncMock)
     async def test_batch_mode(self, mock_extract, mock_fallback):
         mock_extract.return_value = {
             "results": [
@@ -116,7 +116,7 @@ class TestWebFetch:
         assert "2/2" in result
 
     @patch("pivot_web_search_mcp.fetch.render_with_fallback", new_callable=AsyncMock)
-    @patch("pivot_web_search_mcp.search.extract_trafilatura", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.server.extract_trafilatura", new_callable=AsyncMock)
     async def test_max_chars_truncation(self, mock_extract, mock_fallback):
         long_content = "x" * 500
         mock_extract.return_value = {
@@ -157,7 +157,7 @@ class TestWebSearchConfig:
 class TestStructuredErrors:
     @patch.object(server, '_search_with_registry', new_callable=AsyncMock)
     async def test_failure_info_includes_provider_errors(self, mock_search):
-        mock_search.return_value = server._FailureInfo(
+        mock_search.return_value = server.FailureInfo(
             failures=[
                 {"provider": "ddg", "error": "timeout"},
                 {"provider": "tavily", "error": "no api key"},
@@ -173,7 +173,7 @@ class TestStructuredErrors:
 
     @patch.object(server, '_search_with_registry', new_callable=AsyncMock)
     async def test_failure_suggestions_api_key(self, mock_search):
-        mock_search.return_value = server._FailureInfo(
+        mock_search.return_value = server.FailureInfo(
             failures=[{"provider": "tavily", "error": "no api key configured"}]
         )
         result = await server.WebSearch("test")
@@ -182,7 +182,7 @@ class TestStructuredErrors:
 
     @patch.object(server, '_search_with_registry', new_callable=AsyncMock)
     async def test_failure_suggestions_timeout(self, mock_search):
-        mock_search.return_value = server._FailureInfo(
+        mock_search.return_value = server.FailureInfo(
             failures=[{"provider": "ddg", "error": "connection timeout"}]
         )
         result = await server.WebSearch("test")
