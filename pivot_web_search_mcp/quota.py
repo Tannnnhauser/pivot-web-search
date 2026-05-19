@@ -227,7 +227,11 @@ def update_from_brave_headers(headers):
     })
     if reset_at:
         data["brave"]["reset_at"] = reset_at
-    _write_file(data)
+    try:
+        _write_file(data)
+    except OSError as e:
+        log(f"quota write failed (brave headers): {e}")
+        return
     _quota_cache = None
 
 

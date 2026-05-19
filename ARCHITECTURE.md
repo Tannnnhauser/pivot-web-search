@@ -163,7 +163,7 @@ sequenceDiagram
 graph TB
     subgraph "Priority-Group Routing"
         direction TB
-        SG[Smart Defaults<br/>Tavily/Brave=10, SearXNG=30<br/>Gemini=40, LLM=60, DDG=90]
+        SG[Smart Defaults<br/>LLM=10, Tavily/Brave=20<br/>SearXNG=30, Gemini=40, DDG=90]
         AG[Affinity Gate<br/>deep providers excluded<br/>unless explicitly requested]
         QG[Quota Gate<br/>skip exhausted]
         BG[Breaker Gate<br/>skip circuit-open]
@@ -255,7 +255,7 @@ pivot-web-search/
 3. **Config-driven** — providers, proxies, and fetch behavior all via YAML, hot-reloadable
 4. **Quota-aware** — binary exclusion (exhausted = skip), no implicit throttling
 5. **Per-provider timeouts** — no global budget, each provider gets its configured deadline
-6. **Smart defaults** — quality-first ordering (Tavily/Brave > Gemini > LLM > DDG) when no explicit priority
+6. **Smart defaults** — quality-first ordering (LLM Search > Tavily/Brave > SearXNG > Gemini > DDG) when no explicit priority
 7. **3-tier quality gate** — AI answer presence, URL count, keyword overlap drives failover
 8. **Fixed 60s circuit breaker** — 3 consecutive failures opens, no exponential backoff
 9. **Provider affinity** — deep research providers excluded from normal routing unless explicitly requested

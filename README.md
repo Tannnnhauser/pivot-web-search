@@ -270,7 +270,7 @@ Two `api_format` paradigms are supported:
     model: sonar-pro
     api_key_env: PERPLEXITY_API_KEY
     timeout: 15
-    # priority: 60 (smart default)
+    # priority: 10 (smart default)
 ```
 
 Response parsing uses a data-driven fallback chain:

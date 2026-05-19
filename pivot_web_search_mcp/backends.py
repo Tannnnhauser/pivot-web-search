@@ -10,6 +10,7 @@ from .http_client import (
     _open_with_fallback,
     _proxy_cache,
     _proxy_cache_lock,
+    _proxy_cache_ts,
     _save_proxy_cache,
 )
 from .logging import log
@@ -84,7 +85,10 @@ async def search_ddg(query, max_results=5, region="wt-wt", timelimit=None, news=
     async with _proxy_cache_lock:
         if _proxy_cache.get(ddg_host) != proxy:
             _proxy_cache[ddg_host] = proxy
+            _proxy_cache_ts[ddg_host] = time.time()
             await _save_proxy_cache()
+        else:
+            _proxy_cache_ts[ddg_host] = time.time()
     return [{"title": r.get("title", ""),
              "url": r.get("href", r.get("url", "")),
              "snippet": r.get("body", r.get("content", ""))}

@@ -32,9 +32,10 @@ CB_RETRY_AFTER_MAX_S = 600
 
 HEDGE_DELAY_MS = 200
 
-# Total search budget: walk through priority groups must finish in under this
-# many seconds (Sec 5B.2). Single-LLM first group can extend by `timeout + 2`
-# (Sec 5B.4) — see `_effective_budget`.
+# Soft total budget: once exceeded, no new priority group is started. The
+# in-flight group still runs to its own per-provider timeout. The first
+# group can extend the budget when an LLM provider is in play (Sec 5B.4) —
+# see `_effective_budget`.
 TOTAL_BUDGET_S = 10.0
 LLM_BUDGET_EXTENSION_S = 2.0
 
@@ -256,16 +257,22 @@ def build_priority_groups(candidates: list[ScoredProvider]) -> list[list[ScoredP
 def _effective_budget(groups: list[list[ScoredProvider]]) -> float:
     """Total budget for walking priority groups.
 
-    Sec 5B.4: when the first group is a single LLM provider (slow by nature),
-    extend the budget by that provider's timeout + LLM_BUDGET_EXTENSION_S
-    so we don't abort it mid-flight.
+    Sec 5B.4: when any group contains an llm_search provider (slow by nature),
+    extend the budget by that provider's timeout + LLM_BUDGET_EXTENSION_S so
+    the LLM isn't aborted mid-flight by the global deadline. Uses the longest
+    LLM timeout across all groups when several are present.
     """
-    if groups and len(groups[0]) == 1:
-        first = groups[0][0].provider
-        if getattr(first, "provider_type", "") == "llm_search":
-            timeout = getattr(first, "timeout_seconds",
-                              DEFAULT_TIMEOUT.get(first.provider_type, 6))
-            return TOTAL_BUDGET_S + timeout + LLM_BUDGET_EXTENSION_S
+    llm_timeout = 0.0
+    for group in groups:
+        for scored in group:
+            p = scored.provider
+            if getattr(p, "provider_type", "") == "llm_search":
+                t = getattr(p, "timeout_seconds",
+                            DEFAULT_TIMEOUT.get(p.provider_type, 6))
+                if t > llm_timeout:
+                    llm_timeout = t
+    if llm_timeout > 0:
+        return TOTAL_BUDGET_S + llm_timeout + LLM_BUDGET_EXTENSION_S
     return TOTAL_BUDGET_S
 
 
@@ -393,7 +400,7 @@ async def _attempt_single(
         breaker.record_failure(p.name)
         log(f"{p.name} timed out after {timeout}s")
         return _AttemptResult(provider_name=p.name, error="timeout")
-    except (httpx.ConnectError, httpx.NetworkError, OSError) as e:
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError, OSError) as e:
         breaker.record_failure(p.name)
         log(f"{p.name} tcp failure: {e}")
         return _AttemptResult(provider_name=p.name, error="tcp_failure")

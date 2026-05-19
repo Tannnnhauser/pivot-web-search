@@ -461,10 +461,10 @@ _ADAPTER_MAP = {
 # ---------------------------------------------------------------------------
 
 _DEFAULT_PROVIDERS = [
-    {"name": "ddg", "type": "ddg", "enabled": True, "priority": 10},
-    {"name": "tavily", "type": "tavily", "enabled": True, "priority": 20, "api_key_env": "TAVILY_API_KEY"},
-    {"name": "brave", "type": "brave", "enabled": True, "priority": 30, "api_key_env": "BRAVE_API_KEY"},
-    {"name": "gemini", "type": "gemini", "enabled": True, "priority": 40, "api_key_env": "GEMINI_SEARCH_API_KEY"},
+    {"name": "ddg", "type": "ddg", "enabled": True},
+    {"name": "tavily", "type": "tavily", "enabled": True, "api_key_env": "TAVILY_API_KEY"},
+    {"name": "brave", "type": "brave", "enabled": True, "api_key_env": "BRAVE_API_KEY"},
+    {"name": "gemini", "type": "gemini", "enabled": True, "api_key_env": "GEMINI_SEARCH_API_KEY"},
 ]
 
 # ---------------------------------------------------------------------------
