@@ -9,6 +9,7 @@ highest to lowest priority.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -66,6 +67,7 @@ class CircuitBreaker:
 
     def __init__(self):
         self._breakers: dict[str, _BreakerEntry] = {}
+        self._lock = threading.Lock()
 
     def _get_entry(self, name: str) -> _BreakerEntry:
         if name not in self._breakers:
@@ -79,9 +81,12 @@ class CircuitBreaker:
         entry = self._get_entry(name)
         if entry.state == BreakerState.OPEN and entry.opened_at is not None:
             if time.time() - entry.opened_at >= self._cooldown_for(entry):
-                entry.state = BreakerState.HALF_OPEN
-                entry.cooldown_override = None
-                log(f"{name} breaker HALF_OPEN (cooldown expired)")
+                with self._lock:
+                    if entry.state == BreakerState.OPEN and entry.opened_at is not None and \
+                            time.time() - entry.opened_at >= self._cooldown_for(entry):
+                        entry.state = BreakerState.HALF_OPEN
+                        entry.cooldown_override = None
+                        log(f"{name} breaker HALF_OPEN (cooldown expired)")
         return entry.state
 
     def is_available(self, name: str) -> bool:
@@ -288,6 +293,16 @@ class FailureInfo:
     failures: list = field(default_factory=list)
 
 
+def _partial_score(result) -> tuple:
+    """Rank partial results: prefer any AI answer, then more URLs."""
+    if result is None:
+        return (False, 0)
+    answer = getattr(result, "answer", None)
+    has_answer = bool(answer and str(answer).strip())
+    results_list = getattr(result, "results", []) or []
+    return (has_answer, len(results_list))
+
+
 async def execute_search(
     query: str,
     max_results: int,
@@ -303,7 +318,7 @@ async def execute_search(
     candidates = select_providers(providers, breaker, affinity=affinity)
 
     if not candidates:
-        recovery = pick_recovery_candidate(providers, breaker)
+        recovery = pick_recovery_candidate(providers, breaker, affinity=affinity)
         if recovery:
             candidates = [ScoredProvider(
                 provider=recovery,
@@ -352,7 +367,7 @@ async def execute_search(
             return result
 
         # Partial — keep best so far
-        if best_so_far is None or len(results_list) > len(getattr(best_so_far, "results", [])):
+        if best_so_far is None or _partial_score(result) > _partial_score(best_so_far):
             best_so_far = result
             log(f"PARTIAL {group_result.provider_name}: verdict={verdict.value}, continuing")
 
@@ -439,10 +454,11 @@ async def _attempt_hedged(
         task = asyncio.create_task(_delayed_attempt(scored, delay))
         tasks[task] = scored
 
+    # +0.5s slack so asyncio.wait doesn't fire before the last task's per-attempt wait_for under scheduling latency
     outer_timeout = max(
         getattr(s.provider, "timeout_seconds", DEFAULT_TIMEOUT.get(s.provider.provider_type, 6))
         for s in group
-    ) + (len(group) - 1) * HEDGE_DELAY_MS / 1000.0
+    ) + (len(group) - 1) * HEDGE_DELAY_MS / 1000.0 + 0.5
 
     best_partial: _AttemptResult | None = None
     remaining = set(tasks.keys())
@@ -471,8 +487,8 @@ async def _attempt_hedged(
                             t.cancel()
                         return attempt
 
-                    if best_partial is None or len(results_list) > len(
-                        getattr(best_partial.result, "results", []) if best_partial.result else []
+                    if best_partial is None or _partial_score(attempt.result) > _partial_score(
+                        best_partial.result if best_partial else None
                     ):
                         best_partial = attempt
                 elif attempt.error and best_partial is None:
@@ -481,12 +497,8 @@ async def _attempt_hedged(
     finally:
         for t in remaining:
             t.cancel()
-        # Suppress cancellation errors
-        for t in remaining:
-            try:
-                await t
-            except (asyncio.CancelledError, Exception):
-                pass
+        if remaining:
+            await asyncio.gather(*remaining, return_exceptions=True)
 
     if best_partial is not None:
         return best_partial
@@ -498,15 +510,21 @@ async def _attempt_hedged(
 # ---------------------------------------------------------------------------
 
 
-def pick_recovery_candidate(providers, breaker: CircuitBreaker):
-    """All-OPEN fallback: find provider closest to cooldown expiry, force HALF_OPEN."""
+def pick_recovery_candidate(providers, breaker: CircuitBreaker, affinity: str = "general"):
+    """All-OPEN fallback: find OPEN provider closest to cooldown expiry, force HALF_OPEN."""
     best = None
     best_time = float("inf")
 
     for p in providers:
         if not p.enabled:
             continue
+        if getattr(p, "affinity", "general") == "deep" and affinity != "deep":
+            continue
+        if affinity == "deep" and getattr(p, "affinity", "general") not in ("general", "deep"):
+            continue
         if _quota.is_exhausted(p.name):
+            continue
+        if breaker.get_state(p.name) != BreakerState.OPEN:
             continue
         remaining = breaker.time_until_recovery(p.name)
         if remaining < best_time:

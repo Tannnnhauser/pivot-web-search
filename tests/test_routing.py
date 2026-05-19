@@ -497,6 +497,26 @@ class TestPickRecoveryCandidate:
         result = pick_recovery_candidate([], b)
         assert result is None
 
+    def test_recovery_respects_affinity(self):
+        """Deep-only provider must not be picked for a general query."""
+        b = CircuitBreaker()
+        deep_only = FakeProvider("deep_only", affinity="deep")
+        for _ in range(CB_CONSECUTIVE_THRESHOLD):
+            b.record_failure("deep_only")
+        result = pick_recovery_candidate([deep_only], b, affinity="general")
+        assert result is None
+
+    def test_recovery_skips_closed_providers(self):
+        """A CLOSED provider must not be picked over a truly-OPEN one."""
+        b = CircuitBreaker()
+        closed = FakeProvider("closed")  # state stays CLOSED
+        open_p = FakeProvider("open_p")
+        for _ in range(CB_CONSECUTIVE_THRESHOLD):
+            b.record_failure("open_p")
+        result = pick_recovery_candidate([closed, open_p], b)
+        assert result is not None
+        assert result.name == "open_p"
+
 
 # ---------------------------------------------------------------------------
 # Call Counter Tests
@@ -581,3 +601,67 @@ class TestEffectiveBudget:
 
     def test_empty_groups(self):
         assert _effective_budget([]) == TOTAL_BUDGET_S
+
+
+# ---------------------------------------------------------------------------
+# Concurrency Tests
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrentHalfOpen:
+    async def test_concurrent_half_open_only_one_probe(self):
+        """N concurrent is_available checks past cooldown should yield exactly one HALF_OPEN log."""
+        from pivot_web_search_mcp import routing as routing_mod
+
+        b = CircuitBreaker()
+        for _ in range(CB_CONSECUTIVE_THRESHOLD):
+            b.record_failure("p1")
+        # Advance past cooldown
+        b._get_entry("p1").opened_at = time.time() - (CB_COOLDOWN_SECONDS + 1)
+
+        log_calls = []
+        original_log = routing_mod.log
+
+        def capture(msg):
+            log_calls.append(msg)
+            return original_log(msg)
+
+        async def probe():
+            return b.is_available("p1")
+
+        with patch.object(routing_mod, "log", side_effect=capture):
+            results = await asyncio.gather(*[probe() for _ in range(20)])
+
+        assert all(results)
+        half_open_logs = [m for m in log_calls if "HALF_OPEN (cooldown expired)" in m]
+        assert len(half_open_logs) == 1
+
+
+# ---------------------------------------------------------------------------
+# Best-Partial Selection Tests
+# ---------------------------------------------------------------------------
+
+
+class TestBestPartialSelection:
+    async def test_best_partial_prefers_answer_over_url_count(self):
+        """A partial with an AI answer should beat a partial with more URLs but no answer."""
+        with_answer = SearchResult(
+            results=[{"url": "https://a.com", "title": "x", "snippet": "y"}],
+            provider="answerer",
+            answer="short answer",  # < 40 chars so verdict is not ACCEPT via Gate 0
+        )
+        more_urls = SearchResult(
+            results=[
+                {"url": f"https://b{i}.com", "title": "x", "snippet": "y"}
+                for i in range(5)
+            ],
+            provider="urls",
+        )
+        providers = [
+            FakeProvider("answerer", priority=10, search_result=with_answer),
+            FakeProvider("urls", priority=20, search_result=more_urls),
+        ]
+        b = CircuitBreaker()
+        result = await execute_search("zzz_unmatchable_term", 5, providers, b)
+        assert not isinstance(result, FailureInfo)
+        assert result.provider == "answerer"

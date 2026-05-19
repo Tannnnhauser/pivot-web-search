@@ -1,10 +1,11 @@
 """MCP tool function tests — WebSearch, WebFetch, WebSearchConfig with mocked providers."""
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, patch
 
-from pivot_web_search_mcp import server
-from pivot_web_search_mcp.providers import SearchResult
+from pivot_web_search_mcp import routing, server
+from pivot_web_search_mcp.providers import SearchProvider, SearchResult
 
 
 class TestWebSearch:
@@ -188,3 +189,124 @@ class TestStructuredErrors:
         result = await server.WebSearch("test")
         parsed = json.loads(result)
         assert any("network" in s.lower() or "connectivity" in s.lower() for s in parsed["suggestions"])
+
+
+class _SuperFakeProvider(SearchProvider):
+    """Configurable provider for super-mode tests."""
+    provider_type = "fake"
+
+    def __init__(self, name, results=None, raise_exc=None, delay=0.0, timeout=5.0, priority=10):
+        super().__init__(name, priority, True, {"timeout": timeout})
+        self._results = results
+        self._raise_exc = raise_exc
+        self._delay = delay
+
+    async def search(self, query, max_results=5, **kwargs):
+        if self._delay:
+            await asyncio.sleep(self._delay)
+        if self._raise_exc:
+            raise self._raise_exc
+        if self._results is None:
+            return None
+        return SearchResult(results=self._results[:max_results], provider=self.name)
+
+    async def health_check(self):
+        return True, None
+
+
+def _mk_results(n, prefix="r"):
+    return [{"title": f"{prefix}{i}", "url": f"https://{prefix}{i}.example.com", "snippet": f"s{i}"} for i in range(n)]
+
+
+class TestSuperMode:
+    @patch.object(server._registry, 'get_ordered')
+    async def test_super_mode_increments_call_counter(self, mock_ordered):
+        providers = [
+            _SuperFakeProvider("p1", _mk_results(2)),
+            _SuperFakeProvider("p2", _mk_results(2)),
+        ]
+        mock_ordered.return_value = providers
+        sr = await server._search_super_with_registry("q", 5)
+        assert sr is not None
+        assert routing._call_counter.value("p1") == 1
+        assert routing._call_counter.value("p2") == 1
+
+    @patch.object(server._registry, 'get_ordered')
+    async def test_super_mode_isolates_provider_exceptions(self, mock_ordered):
+        providers = [
+            _SuperFakeProvider("bad", raise_exc=RuntimeError("boom")),
+            _SuperFakeProvider("good1", _mk_results(2, prefix="g")),
+            _SuperFakeProvider("good2", _mk_results(2, prefix="h")),
+        ]
+        mock_ordered.return_value = providers
+        sr = await server._search_super_with_registry("q", 5)
+        assert sr is not None
+        assert sr.results
+        urls = [r["url"] for r in sr.results]
+        assert any("g" in u or "h" in u for u in urls)
+
+    @patch.object(server._registry, 'get_ordered')
+    async def test_super_mode_per_provider_timeout(self, mock_ordered):
+        providers = [
+            _SuperFakeProvider("slow", _mk_results(2, prefix="slow"), delay=0.3, timeout=0.05),
+            _SuperFakeProvider("fast", _mk_results(2, prefix="fast"), timeout=2.0),
+        ]
+        mock_ordered.return_value = providers
+        sr = await server._search_super_with_registry("q", 5)
+        assert sr is not None
+        urls = " ".join(r["url"] for r in sr.results)
+        assert "fast" in urls
+        assert "slow" not in urls
+
+    @patch.object(server._registry, 'get_ordered')
+    async def test_super_mode_records_breaker_state(self, mock_ordered):
+        providers = [
+            _SuperFakeProvider("crash", raise_exc=RuntimeError("boom")),
+            _SuperFakeProvider("ok", _mk_results(1, prefix="o")),
+        ]
+        mock_ordered.return_value = providers
+        with patch.object(server._breaker, "record_failure") as mock_fail:
+            await server._search_super_with_registry("q", 5)
+            failed_names = [c.args[0] for c in mock_fail.call_args_list]
+            assert "crash" in failed_names
+
+
+class TestSmartDefaults:
+    def test_english_time_sensitive_sets_timelimit(self):
+        out = server._apply_smart_defaults("latest news on AI", {"timelimit": None, "news": None})
+        assert out["timelimit"] == "m"
+
+    def test_cjk_time_sensitive_sets_timelimit(self):
+        out = server._apply_smart_defaults("今年的最新新闻", {"timelimit": None, "news": None})
+        assert out["timelimit"] == "m"
+
+    def test_non_time_sensitive_untouched(self):
+        out = server._apply_smart_defaults("how does photosynthesis work", {"timelimit": None, "news": None})
+        assert out["timelimit"] is None
+        assert out["news"] is None
+
+    def test_news_mode_detection(self):
+        out = server._apply_smart_defaults("breaking news on election", {"timelimit": None, "news": None})
+        assert out["news"] is True
+
+    def test_does_not_mutate_input(self):
+        kwargs = {"timelimit": None, "news": None}
+        server._apply_smart_defaults("latest news on AI", kwargs)
+        assert kwargs == {"timelimit": None, "news": None}
+
+    def test_explicit_timelimit_preserved(self):
+        out = server._apply_smart_defaults("latest news", {"timelimit": "d", "news": None})
+        assert out["timelimit"] == "d"
+
+
+class TestExplicitProviderFailure:
+    @patch.object(server._registry, 'get_by_name')
+    async def test_explicit_provider_failure_records_breaker(self, mock_get):
+        provider = _SuperFakeProvider("tavily", raise_exc=RuntimeError("api down"))
+        mock_get.return_value = provider
+        with patch.object(server._breaker, "record_failure") as mock_fail:
+            result = await server.WebSearch("test", provider="tavily")
+            failed_names = [c.args[0] for c in mock_fail.call_args_list]
+            assert "tavily" in failed_names
+            parsed = json.loads(result)
+            assert "error" in parsed

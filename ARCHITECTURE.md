@@ -104,7 +104,7 @@ sequenceDiagram
         RT->>RT: skip circuit-broken providers
         S->>P: parallel search (per-provider timeouts)
         P-->>S: results from each provider
-        S->>S: deduplicate & rank (RRF)
+        S->>S: deduplicate & rank (provider-agreement count)
         S-->>LLM: merged markdown results
     else normal mode
         S->>RT: execute_search(query, providers, breaker)
@@ -243,7 +243,7 @@ pivot-web-search/
 │   ├── fetch.py             # SPA detection, JS renderer dispatch
 │   ├── logging.py           # Centralized logging (stderr + optional file)
 │   └── quota.py             # Per-provider quota tracking, filelock (cross-platform)
-├── tests/                   # 265 tests (pytest-asyncio), 15 modules
+├── tests/                   # 306 tests (pytest-asyncio), 15 modules
 ├── skills/pivot-web-search/       # Skill definition for Claude Code
 └── docs/                    # Design documents (not tracked in git)
 ```

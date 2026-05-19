@@ -104,3 +104,26 @@ class TestExtractTerms:
     def test_empty_query(self):
         terms = _extract_terms("")
         assert terms == []
+
+
+class TestKeywordTokenMatch:
+    def test_keyword_substring_no_longer_matches(self):
+        """Token-based match: query 'ai' should not match a result titled 'available'."""
+        results = [
+            {"url": "https://a.com", "title": "Available products", "snippet": "Stuff in stock"},
+            {"url": "https://b.com", "title": "Going somewhere", "snippet": "Travel content"},
+        ]
+        # "ai" is not a stopword and length > 1
+        result = quality_gate("ai", results)
+        assert result == Verdict.PARTIAL
+
+
+class TestNonEnglishFallback:
+    def test_non_english_query_uses_url_count_fallback(self):
+        """Chinese query (no English terms after stopword filter) with 2 URLs → ACCEPT via fallback."""
+        results = [
+            {"url": "https://a.com", "title": "page", "snippet": "content"},
+            {"url": "https://b.com", "title": "another", "snippet": "more"},
+        ]
+        result = quality_gate("人工智能", results)
+        assert result == Verdict.ACCEPT

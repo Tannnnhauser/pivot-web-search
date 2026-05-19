@@ -4,7 +4,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
-[![Tests: 265](https://img.shields.io/badge/tests-265%20passing-brightgreen.svg)]()
+[![Tests: 306](https://img.shields.io/badge/tests-306%20passing-brightgreen.svg)]()
 
 ## What Is This?
 
@@ -136,7 +136,7 @@ When called via MCP, tools are prefixed: `mcp__pivot-web-search__WebSearch`, `mc
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `query` | str | *required* | Search query |
-| `provider` | str | `"auto"` | Force provider: `auto` / `ddg` / `tavily` / `brave` / `gemini` |
+| `provider` | str | `"auto"` | Force provider: `auto` / `ddg` / `tavily` / `brave` / `gemini` / `searxng`, or any registered provider name (e.g. custom `json_api` or `llm_search` instances) |
 | `super_mode` | bool | `false` | Query all providers in parallel for maximum coverage |
 | `max_results` | int | `5` | Number of results: 1–10 (1–20 in super mode) |
 | `allowed_domains` | list[str] | `null` | Only include results from these domains |
@@ -145,6 +145,7 @@ When called via MCP, tools are prefixed: `mcp__pivot-web-search__WebSearch`, `mc
 | `timelimit` | str | `null` | Time filter: `d` = day, `w` = week, `m` = month, `y` = year |
 | `include_answer` | bool | `false` | AI-generated answer summary (Tavily only) |
 | `include_content` | bool | `false` | Return pre-extracted page content with results (Brave LLM Context) |
+| `max_content_tokens` | int | `8192` | Token budget for content extraction when `include_content=true` (1024–32768) |
 | `search_depth` | str | `"basic"` | `basic` or `advanced` — advanced gives more detail but costs 2x credits (Tavily only) |
 | `topic` | str | `"general"` | `general` or `news` (Tavily only) |
 | `days` | int | `null` | Limit news to recent N days (Tavily only) |
@@ -233,13 +234,6 @@ providers:
   #     title: "title"
   #     url: "link"
   #     snippet: "snippet"
-
-circuit_breaker:
-  consecutive_threshold: 3
-  cooldown: 60
-
-latency:
-  hedge_delay_ms: 200
 ```
 
 **Smart default priorities** (when no explicit `priority` is set):
@@ -251,6 +245,8 @@ latency:
 | `searxng` / `json_api` | 30 | 6s |
 | `gemini` | 40 | 20s |
 | `ddg` | 90 | 6s |
+
+> **Note:** Enabling an `llm_search` provider trades latency for quality — at priority 10 it runs ahead of Tavily/Brave with a 15s timeout, so every query may take 15+s. Bump its `priority` above 20 (or omit it from the config) if latency matters more than answer quality.
 
 ### LLM Search Providers (`type: llm_search`)
 
@@ -394,14 +390,14 @@ config/                 YAML config for providers, proxies, and fetch (hot-reloa
 scripts/
   health-check.py       Startup probe — reports provider availability and quota
   pretool-check.py      PreToolUse hook script — fail-open tool blocker
-tests/                  265 tests across 15 modules (pytest-asyncio)
+tests/                  306 tests across 15 modules (pytest-asyncio)
 ```
 
 ## Testing
 
 ```sh
 uv sync --extra dev                   # install dev dependencies
-pytest -m "not integration"           # 265 offline tests (~5s)
+pytest -m "not integration"           # 306 offline tests (~5s)
 pytest                                # all tests including live API integration (requires API keys)
 ```
 

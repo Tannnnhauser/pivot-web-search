@@ -224,9 +224,8 @@ def update_from_brave_headers(headers):
         "remaining": monthly_remaining,
         "source": "header",
         "last_synced": datetime.now(timezone.utc).isoformat(),
+        "reset_at": reset_at,
     })
-    if reset_at:
-        data["brave"]["reset_at"] = reset_at
     try:
         _write_file(data)
     except OSError as e:

@@ -3,7 +3,7 @@
 # Providers are tried by priority (lower number = tried first).
 # Same-priority providers are hedged (queried concurrently, first quality result wins).
 # If no priority is set, smart defaults apply based on provider type:
-#   tavily/brave = 10, searxng/json_api = 30, gemini = 40, llm_search = 60, ddg = 90
+#   llm_search = 10, tavily/brave = 20, searxng/json_api = 30, gemini = 40, ddg = 90
 #
 # Fields:
 #   name        (required) Unique identifier
@@ -18,13 +18,13 @@ providers:
   - name: tavily
     type: tavily
     api_key_env: TAVILY_API_KEY
-    # priority: 10 (smart default — hedged with brave)
+    # priority: 20 (smart default — hedged with brave)
     # timeout: 4 (smart default)
 
   - name: brave
     type: brave
     api_key_env: BRAVE_API_KEY
-    # priority: 10 (smart default — hedged with tavily)
+    # priority: 20 (smart default — hedged with tavily)
     # timeout: 4 (smart default)
 
   - name: gemini
@@ -74,7 +74,7 @@ providers:
   #   model: sonar-pro
   #   api_key_env: PERPLEXITY_API_KEY
   #   timeout: 15
-  #   # priority: 60 (smart default)
+  #   # priority: 10 (smart default)
   #   # affinity: general
 
   # ─── LLM Search (responses format — OpenAI Responses API) ───────────
@@ -97,12 +97,3 @@ providers:
   #   api_key_env: PERPLEXITY_API_KEY
   #   affinity: deep
   #   timeout: 180
-
-# Circuit breaker configuration
-circuit_breaker:
-  consecutive_threshold: 3
-  cooldown: 60
-
-# Latency configuration
-latency:
-  hedge_delay_ms: 200

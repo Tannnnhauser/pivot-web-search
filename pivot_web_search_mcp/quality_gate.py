@@ -4,6 +4,7 @@ Determines whether a provider's response is good enough to return or
 whether routing should continue to the next priority group.
 """
 
+import re
 from enum import Enum
 
 _STOPWORDS = frozenset(
@@ -44,22 +45,25 @@ def quality_gate(
     if len(unique_urls) < 2:
         return Verdict.PARTIAL if unique_urls else Verdict.FAIL
 
-    # Gate 2: Keyword overlap
+    # Gate 2: Keyword overlap (word-boundary token match)
     terms = _extract_terms(query)
     if not terms:
-        return Verdict.ACCEPT
+        # Non-English / all-stopword queries fall back to URL-count gate
+        return Verdict.ACCEPT if len(unique_urls) >= 2 else Verdict.PARTIAL
 
+    term_set = set(terms)
     for r in results:
         text = f"{r.get('title', '')} {r.get('snippet', '')}".lower()
-        if any(t in text for t in terms):
+        tokens = set(re.findall(r"\w+", text))
+        if term_set & tokens:
             return Verdict.ACCEPT
 
     return Verdict.PARTIAL
 
 
 def _extract_terms(query: str) -> list[str]:
-    """Extract significant terms from query, longest first. Max 5."""
-    words = query.lower().split()
+    """Extract significant ASCII terms from query, longest first. Max 5."""
+    words = re.findall(r"[a-z]+", query.lower())
     terms = [w for w in words if w not in _STOPWORDS and len(w) > 1]
     terms.sort(key=len, reverse=True)
     return terms[:5]

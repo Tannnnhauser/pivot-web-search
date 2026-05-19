@@ -32,7 +32,7 @@ from .extraction import extract_trafilatura
 from .logging import log
 from .providers import ProviderRegistry, SearchResult
 from .results import dedup_and_rank, to_markdown
-from .routing import CircuitBreaker, FailureInfo, ScoredProvider, _attempt_single, execute_search, select_providers
+from .routing import CircuitBreaker, FailureInfo, ScoredProvider, _attempt_single, _call_counter, execute_search, select_providers
 from .validation import MAX_CONTENT_CHARS, validate_url
 
 
@@ -181,6 +181,7 @@ async def _search_super_with_registry(query, max_results, **kwargs):
             results_by_provider[p.name] = sr.results
             _quota.record_usage(p.name)
             _breaker.record_success(p.name)
+            _call_counter.increment(p.name)
             log(f"super: {p.name} returned {len(sr.results)} results")
             if sr.answer and not answer:
                 answer = sr.answer
@@ -206,11 +207,12 @@ _NEWS_PATTERN = _re.compile(
 
 def _apply_smart_defaults(query, kwargs):
     """Detect query characteristics and set soft defaults for unset parameters."""
-    if kwargs.get("timelimit") is None and _TIME_SENSITIVE_PATTERN.search(query):
-        kwargs["timelimit"] = "m"
-    if kwargs.get("news") is None and _NEWS_PATTERN.search(query):
-        kwargs["news"] = True
-    return kwargs
+    result = dict(kwargs)
+    if result.get("timelimit") is None and _TIME_SENSITIVE_PATTERN.search(query):
+        result["timelimit"] = "m"
+    if result.get("news") is None and _NEWS_PATTERN.search(query):
+        result["news"] = True
+    return result
 
 
 def _format_content_results(results, query):
@@ -311,7 +313,7 @@ async def WebSearch(
             "exclude_domains": exclude_domains,
         }
 
-        _apply_smart_defaults(query, search_kwargs)
+        search_kwargs = _apply_smart_defaults(query, search_kwargs)
 
         # include_content mode: try Brave LLM Context first (search + content in one call)
         if include_content and not news:
