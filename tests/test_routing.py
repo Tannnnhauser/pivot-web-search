@@ -10,11 +10,14 @@ from pivot_web_search_mcp.routing import (
     CB_COOLDOWN_SECONDS,
     DEFAULT_TIMEOUT,
     HEDGE_DELAY_MS,
+    LLM_BUDGET_EXTENSION_S,
     SMART_DEFAULT_PRIORITY,
+    TOTAL_BUDGET_S,
     BreakerState,
     CircuitBreaker,
     ScoredProvider,
     _CallCounter,
+    _effective_budget,
     FailureInfo,
     build_priority_groups,
     execute_search,
@@ -422,6 +425,23 @@ class TestExecuteSearch:
         assert not isinstance(result, FailureInfo)
         assert result.provider == "b"
 
+    async def test_connect_timeout_classified_as_tcp_failure(self):
+        """httpx.ConnectTimeout (NOT a subclass of ConnectError) must also count as tcp_failure."""
+        import httpx
+        providers = [
+            FakeProvider("a", provider_type="tavily", priority=10,
+                         search_error=httpx.ConnectTimeout("connect timed out")),
+            FakeProvider("b", provider_type="brave", priority=20,
+                         search_error=httpx.ConnectTimeout("connect timed out")),
+            FakeProvider("c", provider_type="ddg", priority=30,
+                         search_result=make_result(3, "c")),
+        ]
+        b = CircuitBreaker()
+        result = await execute_search("test", 5, providers, b)
+        assert isinstance(result, FailureInfo)
+        assert sum(1 for f in result.failures if f["error"] == "tcp_failure") == 2
+        assert all(f["provider"] != "c" for f in result.failures)
+
     async def test_call_counter_only_on_success(self):
         """DC2: failed attempts should NOT increment call_counter."""
         from pivot_web_search_mcp.routing import _call_counter
@@ -499,3 +519,65 @@ class TestCallCounter:
         c.increment("p1")
         c.reset()
         assert c.value("p1") == 0
+
+
+# ---------------------------------------------------------------------------
+# Effective Budget Tests
+# ---------------------------------------------------------------------------
+
+
+def _grouped(*priorities_and_providers):
+    """Build groups list from (priority, provider) tuples."""
+    candidates = [ScoredProvider(p, prio, 0, 0) for prio, p in priorities_and_providers]
+    return build_priority_groups(candidates)
+
+
+class TestEffectiveBudget:
+    def test_no_llm_uses_base_budget(self):
+        groups = _grouped(
+            (10, FakeProvider("tavily", provider_type="tavily")),
+            (20, FakeProvider("ddg", provider_type="ddg")),
+        )
+        assert _effective_budget(groups) == TOTAL_BUDGET_S
+
+    def test_llm_in_first_group_extends_budget(self):
+        llm = FakeProvider("perplexity", provider_type="llm_search", timeout=15)
+        groups = _grouped((10, llm))
+        assert _effective_budget(groups) == TOTAL_BUDGET_S + 15 + LLM_BUDGET_EXTENSION_S
+
+    def test_llm_in_second_group_extends_budget(self):
+        """LLM in any group extends — must scan all groups, not just first."""
+        groups = _grouped(
+            (10, FakeProvider("tavily", provider_type="tavily")),
+            (20, FakeProvider("perplexity", provider_type="llm_search", timeout=15)),
+        )
+        assert _effective_budget(groups) == TOTAL_BUDGET_S + 15 + LLM_BUDGET_EXTENSION_S
+
+    def test_max_llm_timeout_wins_across_groups(self):
+        """Multiple LLMs: budget uses the longest timeout."""
+        groups = _grouped(
+            (10, FakeProvider("fast_llm", provider_type="llm_search", timeout=8)),
+            (20, FakeProvider("slow_llm", provider_type="llm_search", timeout=20)),
+        )
+        assert _effective_budget(groups) == TOTAL_BUDGET_S + 20 + LLM_BUDGET_EXTENSION_S
+
+    def test_hedged_llm_group_extends_once(self):
+        """Two LLMs at same priority: max timeout wins, extension applied once."""
+        candidates = [
+            ScoredProvider(FakeProvider("a", provider_type="llm_search", timeout=12), 10, 0, 0),
+            ScoredProvider(FakeProvider("b", provider_type="llm_search", timeout=18), 10, 0, 1),
+        ]
+        groups = build_priority_groups(candidates)
+        assert len(groups) == 1
+        assert _effective_budget(groups) == TOTAL_BUDGET_S + 18 + LLM_BUDGET_EXTENSION_S
+
+    def test_llm_with_default_timeout(self):
+        """LLM without explicit timeout falls back to DEFAULT_TIMEOUT['llm_search']."""
+        llm = FakeProvider("p", provider_type="llm_search", timeout=None)
+        # FakeProvider's timeout_seconds property returns DEFAULT_TIMEOUT lookup when timeout=None
+        groups = _grouped((10, llm))
+        expected = TOTAL_BUDGET_S + DEFAULT_TIMEOUT["llm_search"] + LLM_BUDGET_EXTENSION_S
+        assert _effective_budget(groups) == expected
+
+    def test_empty_groups(self):
+        assert _effective_budget([]) == TOTAL_BUDGET_S

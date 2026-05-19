@@ -582,9 +582,9 @@ class ProviderRegistry:
             pass
 
     def get_ordered(self):
-        """Returns enabled providers sorted by priority (ascending). Auto-reloads on config change."""
+        """Returns enabled providers sorted by effective_priority (ascending). Auto-reloads on config change."""
         self._check_reload()
-        return sorted([p for p in self._providers if p.enabled], key=lambda p: p.priority)
+        return sorted([p for p in self._providers if p.enabled], key=lambda p: p.effective_priority)
 
     def get_all(self):
         """Returns all providers (including disabled). Auto-reloads on config change."""
