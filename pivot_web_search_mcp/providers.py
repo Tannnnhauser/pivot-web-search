@@ -19,6 +19,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 
 from .logging import log
+from .validation import _load_env_key
 
 # ---------------------------------------------------------------------------
 # Config paths — resolved relative to the project root (parent of pivot_web_search_mcp/)
@@ -151,7 +152,7 @@ class TavilyProvider(SearchProvider):
 
     def _get_key(self):
         env_var = self.config.get("api_key_env", "TAVILY_API_KEY")
-        return os.environ.get(env_var, "").strip() or None
+        return _load_env_key(env_var)
 
     async def search(self, query, max_results=5, **kwargs):
         from . import search as s
@@ -179,7 +180,7 @@ class BraveProvider(SearchProvider):
 
     def _get_key(self):
         env_var = self.config.get("api_key_env", "BRAVE_API_KEY")
-        return os.environ.get(env_var, "").strip() or None
+        return _load_env_key(env_var)
 
     async def search(self, query, max_results=5, **kwargs):
         from . import search as s
@@ -222,7 +223,7 @@ class LlmSearchProvider(SearchProvider):
         env_var = self.config.get("api_key_env")
         if not env_var:
             return None
-        return os.environ.get(env_var, "").strip() or None
+        return _load_env_key(env_var)
 
     async def search(self, query, max_results=5, **kwargs):
         api_key = self._get_key()
@@ -298,10 +299,10 @@ class GeminiProvider(LlmSearchProvider):
 
     def _get_key(self):
         env_var = self.config.get("api_key_env", "GEMINI_SEARCH_API_KEY")
-        key = os.environ.get(env_var, "").strip()
+        key = _load_env_key(env_var)
         if not key:
-            key = os.environ.get("GOOGLE_STUDIO_API_KEY", "").strip()
-        return key or None
+            key = _load_env_key("GOOGLE_STUDIO_API_KEY")
+        return key
 
     async def search(self, query, max_results=5, **kwargs):
         api_key = self._get_key()
@@ -374,7 +375,7 @@ class JsonApiProvider(SearchProvider):
         env_var = self.config.get("api_key_env")
         if not env_var:
             return None
-        return os.environ.get(env_var, "").strip() or None
+        return _load_env_key(env_var)
 
     def _resolve_dotpath(self, obj, path):
         """Resolve a dotpath like 'data.results' into nested dict access."""

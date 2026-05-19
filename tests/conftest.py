@@ -5,6 +5,15 @@ from pivot_web_search_mcp import extraction, http_client, providers, quota, rout
 
 
 @pytest.fixture(autouse=True)
+def _scrub_userconfig_env(monkeypatch):
+    """Strip any PIVOT_USERCONFIG_* env vars so tests see a clean slate.
+    Tests that exercise the UI-config path should set these explicitly."""
+    import os
+    for name in [k for k in os.environ if k.startswith("PIVOT_USERCONFIG_")]:
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_quota(tmp_path, monkeypatch):
     """Redirect quota.json to a temp dir so tests don't touch real state."""
     monkeypatch.setattr(quota, "_QUOTA_DIR", tmp_path)

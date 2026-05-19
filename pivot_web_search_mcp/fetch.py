@@ -125,7 +125,8 @@ async def render_with_fallback(url: str, config: dict, query: str | None = None)
 
     if renderer == "tavily":
         tv_conf = config.get("tavily", {})
-        api_key = os.environ.get("TAVILY_API_KEY", "").strip()
+        from .validation import _load_env_key
+        api_key = _load_env_key("TAVILY_API_KEY") or ""
         return await render_tavily(
             url, api_key,
             extract_depth=tv_conf.get("extract_depth", "advanced"),

@@ -226,7 +226,8 @@ async def sync_tavily_usage(api_key=None):
     Rate-limited to 1 call per minute. Returns True on success.
     """
     if not api_key:
-        api_key = os.environ.get("TAVILY_API_KEY", "").strip()
+        from .validation import _load_env_key
+        api_key = _load_env_key("TAVILY_API_KEY")
     if not api_key:
         return False
 

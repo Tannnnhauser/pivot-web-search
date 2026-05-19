@@ -59,13 +59,21 @@ The plugin prompts for configuration at install time:
 | Setting | Description |
 |---|---|
 | **Search providers** | Comma-separated list in failover order (default: `ddg,tavily,brave,gemini`) |
-| **Tavily API Key** | Stored in system keychain. Leave empty to skip. |
-| **Brave Search API Key** | Stored in system keychain. Leave empty to skip. |
-| **Gemini API Key** | Stored in system keychain. Leave empty to skip. |
+| **Tavily API Key** | Stored in system keychain. Leave empty to inherit `TAVILY_API_KEY` from the shell. |
+| **Brave Search API Key** | Stored in system keychain. Leave empty to inherit `BRAVE_API_KEY` from the shell. |
+| **Gemini API Key** | Stored in system keychain. Leave empty to inherit `GEMINI_SEARCH_API_KEY` (or `GOOGLE_STUDIO_API_KEY`) from the shell. |
 | **Proxy URLs** | Comma-separated, priority order. `direct` = no proxy (default: `direct`) |
 | **Gemini daily quota** | Optional. Limits Gemini grounded searches per day (resets at PT midnight). Check your limit at [AI Studio](https://aistudio.google.com/rate-limit). |
 
 DDG needs no API key. Providers without a key are automatically skipped during failover.
+
+**Key resolution order** — for each provider key, the plugin reads:
+1. The standard env var (e.g. `TAVILY_API_KEY`) inherited from the parent shell. **Wins if set.**
+2. The `/plugin` UI value (injected as `PIVOT_USERCONFIG_TAVILY_API_KEY`).
+
+This means a value exported in your shell always takes precedence over the UI config. To use the UI value instead, `unset TAVILY_API_KEY` in your shell.
+
+> **macOS GUI launch caveat:** When Claude Code is started from Spotlight or the Dock, it does **not** see your `~/.zshrc` exports. Either start it from a terminal, set keys via the `/plugin` UI, or add them to the `env` block in `~/.claude/config.json`.
 
 You can reconfigure anytime via `claude plugin configure pivot-web-search`.
 

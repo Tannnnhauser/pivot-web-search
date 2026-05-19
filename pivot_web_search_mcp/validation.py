@@ -19,12 +19,23 @@ BINARY_CONTENT_TYPES = {"image/", "audio/", "video/", "application/octet-stream"
 # ---------------------------------------------------------------------------
 
 
+def _load_env_key(name):
+    """Read env var `name`, falling back to PIVOT_USERCONFIG_{name} (set by the
+    plugin's .mcp.json from /plugin UI config). Standard name wins so a value
+    inherited from the parent shell takes precedence over UI config."""
+    val = os.environ.get(name, "").strip()
+    if val:
+        return val
+    val = os.environ.get(f"PIVOT_USERCONFIG_{name}", "").strip()
+    return val or None
+
+
 def _load_tavily_key():
-    return os.environ.get("TAVILY_API_KEY", "").strip() or None
+    return _load_env_key("TAVILY_API_KEY")
 
 
 def _load_brave_key():
-    return os.environ.get("BRAVE_API_KEY", "").strip() or None
+    return _load_env_key("BRAVE_API_KEY")
 
 
 # ---------------------------------------------------------------------------
