@@ -54,10 +54,10 @@ def _reset_proxy_config():
 def _reset_circuit_breaker():
     """Reset routing circuit breaker and call counter between tests."""
     server._breaker.reset_all()
-    routing._call_counter.reset()
+    routing.call_counter.reset()
     yield
     server._breaker.reset_all()
-    routing._call_counter.reset()
+    routing.call_counter.reset()
 
 
 @pytest.fixture(autouse=True)

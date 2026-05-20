@@ -7,23 +7,22 @@ from unittest.mock import patch
 import httpx
 
 from pivot_web_search_mcp import quota
+from pivot_web_search_mcp.defaults import DEFAULT_TIMEOUT, SMART_DEFAULT_PRIORITY
 from pivot_web_search_mcp.providers import SearchResult
 from pivot_web_search_mcp.routing import (
     CB_CONSECUTIVE_THRESHOLD,
     CB_COOLDOWN_SECONDS,
-    DEFAULT_TIMEOUT,
     HEDGE_DELAY_MS,
     LLM_BUDGET_EXTENSION_S,
-    SMART_DEFAULT_PRIORITY,
     TOTAL_BUDGET_S,
+    AttemptResult,
     BreakerState,
+    CallCounter,
     CircuitBreaker,
     FailureInfo,
     ScoredProvider,
-    _AttemptResult,
-    _CallCounter,
-    _effective_budget,
     build_priority_groups,
+    effective_budget,
     execute_search,
     pick_recovery_candidate,
     select_providers,
@@ -427,7 +426,11 @@ class TestExecuteSearch:
             b.record_failure("solo")
         result = await execute_search("test", 5, providers, b)
         assert isinstance(result, FailureInfo)
-        assert result.failures == [{"provider": "all", "error": "all providers in cooldown"}]
+        assert len(result.failures) == 1
+        f = result.failures[0]
+        assert f["provider"] == "solo"
+        assert f["state"] == "circuit_open"
+        assert f["cooldown_remaining_seconds"] > 0
 
     async def test_tcp_failure_aborts_after_two_groups(self):
         """Two consecutive TCP-level failures should short-circuit (no network)."""
@@ -478,10 +481,10 @@ class TestExecuteSearch:
         assert sum(1 for f in result.failures if f["error"] == "tcp_failure") == 2
         assert all(f["provider"] != "c" for f in result.failures)
 
-    async def test_call_counter_only_on_success(self):
+    async def testcall_counter_only_on_success(self):
         """DC2: failed attempts should NOT increment call_counter."""
-        from pivot_web_search_mcp.routing import _call_counter
-        _call_counter.reset()
+        from pivot_web_search_mcp.routing import call_counter
+        call_counter.reset()
         providers = [
             FakeProvider("flaky", priority=10,
                          search_error=RuntimeError("boom")),
@@ -490,8 +493,8 @@ class TestExecuteSearch:
         ]
         b = CircuitBreaker()
         await execute_search("test", 5, providers, b)
-        assert _call_counter.value("flaky") == 0
-        assert _call_counter.value("ok") == 1
+        assert call_counter.value("flaky") == 0
+        assert call_counter.value("ok") == 1
 
     async def test_stops_starting_new_groups_once_total_budget_is_spent(self):
         partial = SearchResult(
@@ -509,12 +512,12 @@ class TestExecuteSearch:
         b = CircuitBreaker()
 
         group_results = iter([
-            _AttemptResult(provider_name="g1", result=partial),
-            _AttemptResult(provider_name="g2", error="timeout"),
-            _AttemptResult(provider_name="g3", result=make_result(3, "g3")),
+            AttemptResult(provider_name="g1", result=partial),
+            AttemptResult(provider_name="g2", error="timeout"),
+            AttemptResult(provider_name="g3", result=make_result(3, "g3")),
         ])
 
-        with patch("pivot_web_search_mcp.routing._effective_budget", return_value=1.0), \
+        with patch("pivot_web_search_mcp.routing.effective_budget", return_value=1.0), \
                 patch("pivot_web_search_mcp.routing._execute_priority_group",
                       side_effect=lambda *args, **kwargs: next(group_results)) as mock_exec, \
                 patch("pivot_web_search_mcp.routing.time.time", return_value=0.0), \
@@ -641,17 +644,17 @@ class TestPickRecoveryCandidate:
 
 class TestCallCounter:
     def test_initial_value_is_zero(self):
-        c = _CallCounter()
+        c = CallCounter()
         assert c.value("new") == 0
 
     def test_increment(self):
-        c = _CallCounter()
+        c = CallCounter()
         c.increment("p1")
         c.increment("p1")
         assert c.value("p1") == 2
 
     def test_reset(self):
-        c = _CallCounter()
+        c = CallCounter()
         c.increment("p1")
         c.reset()
         assert c.value("p1") == 0
@@ -674,12 +677,12 @@ class TestEffectiveBudget:
             (10, FakeProvider("tavily", provider_type="tavily")),
             (20, FakeProvider("ddg", provider_type="ddg")),
         )
-        assert _effective_budget(groups) == TOTAL_BUDGET_S
+        assert effective_budget(groups) == TOTAL_BUDGET_S
 
     def test_llm_in_first_group_extends_budget(self):
         llm = FakeProvider("perplexity", provider_type="llm_search", timeout=15)
         groups = _grouped((10, llm))
-        assert _effective_budget(groups) == TOTAL_BUDGET_S + 15 + LLM_BUDGET_EXTENSION_S
+        assert effective_budget(groups) == TOTAL_BUDGET_S + 15 + LLM_BUDGET_EXTENSION_S
 
     def test_llm_in_second_group_extends_budget(self):
         """LLM in any group extends — must scan all groups, not just first."""
@@ -687,7 +690,7 @@ class TestEffectiveBudget:
             (10, FakeProvider("tavily", provider_type="tavily")),
             (20, FakeProvider("perplexity", provider_type="llm_search", timeout=15)),
         )
-        assert _effective_budget(groups) == TOTAL_BUDGET_S + 15 + LLM_BUDGET_EXTENSION_S
+        assert effective_budget(groups) == TOTAL_BUDGET_S + 15 + LLM_BUDGET_EXTENSION_S
 
     def test_max_llm_timeout_wins_across_groups(self):
         """Multiple LLMs: budget uses the longest timeout."""
@@ -695,7 +698,7 @@ class TestEffectiveBudget:
             (10, FakeProvider("fast_llm", provider_type="llm_search", timeout=8)),
             (20, FakeProvider("slow_llm", provider_type="llm_search", timeout=20)),
         )
-        assert _effective_budget(groups) == TOTAL_BUDGET_S + 20 + LLM_BUDGET_EXTENSION_S
+        assert effective_budget(groups) == TOTAL_BUDGET_S + 20 + LLM_BUDGET_EXTENSION_S
 
     def test_hedged_llm_group_extends_once(self):
         """Two LLMs at same priority: max timeout wins, extension applied once."""
@@ -705,7 +708,7 @@ class TestEffectiveBudget:
         ]
         groups = build_priority_groups(candidates)
         assert len(groups) == 1
-        assert _effective_budget(groups) == TOTAL_BUDGET_S + 18 + LLM_BUDGET_EXTENSION_S
+        assert effective_budget(groups) == TOTAL_BUDGET_S + 18 + LLM_BUDGET_EXTENSION_S
 
     def test_llm_with_default_timeout(self):
         """LLM without explicit timeout falls back to DEFAULT_TIMEOUT['llm_search']."""
@@ -713,10 +716,10 @@ class TestEffectiveBudget:
         # FakeProvider's timeout_seconds property returns DEFAULT_TIMEOUT lookup when timeout=None
         groups = _grouped((10, llm))
         expected = TOTAL_BUDGET_S + DEFAULT_TIMEOUT["llm_search"] + LLM_BUDGET_EXTENSION_S
-        assert _effective_budget(groups) == expected
+        assert effective_budget(groups) == expected
 
     def test_empty_groups(self):
-        assert _effective_budget([]) == TOTAL_BUDGET_S
+        assert effective_budget([]) == TOTAL_BUDGET_S
 
 
 # ---------------------------------------------------------------------------

@@ -5,14 +5,10 @@ import urllib.parse
 
 def _normalize_url(url):
     """Normalize a URL for deduplication."""
-    try:
-        parsed = urllib.parse.urlparse(url)
-        host = parsed.hostname or ""
-        host = host.lower().removeprefix("www.")
-        path = parsed.path.rstrip("/")
-        return f"{host}{path}"
-    except Exception:
-        return url.lower()
+    parsed = urllib.parse.urlparse(url)
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    path = parsed.path.rstrip("/")
+    return f"{host}{path}"
 
 
 def dedup_and_rank(results_by_provider, max_results):
@@ -54,10 +50,15 @@ def dedup_and_rank(results_by_provider, max_results):
     return merged, providers_used
 
 
-def to_markdown(results, query, answer=None, provider=None):
+def to_markdown(results, query, answer=None, provider=None, content_downgrade_reason=None):
     lines = []
     if provider:
         lines.append(f"*Source: {provider}*\n")
+    if content_downgrade_reason:
+        lines.append(
+            f"*Note: include_content downgraded — {content_downgrade_reason}; "
+            "returning titles+snippets only.*\n"
+        )
     if answer:
         lines.append(f"{answer.strip()}\n")
     for i, r in enumerate(results, 1):

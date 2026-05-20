@@ -11,7 +11,6 @@ Exposes three tools:
 Run: python3 server.py  (stdio transport)
 """
 
-import asyncio
 import json
 import os
 import re as _re
@@ -30,16 +29,15 @@ from .config import (
 )
 from .extraction import extract_trafilatura
 from .logging import log
-from .providers import ProviderRegistry, SearchResult
-from .results import dedup_and_rank, to_markdown
+from .providers import ProviderRegistry
+from .results import to_markdown
 from .routing import (
     CircuitBreaker,
     FailureInfo,
     ScoredProvider,
-    _call_counter,
     attempt_single,
     execute_search,
-    select_providers,
+    execute_super_search,
 )
 from .validation import MAX_CONTENT_CHARS, validate_url
 
@@ -150,63 +148,6 @@ async def _search_with_registry(query, max_results, provider_name="auto", **kwar
     )
 
 
-async def _search_super_with_registry(query, max_results, **kwargs):
-    """Query all eligible providers in parallel with per-provider timeouts.
-
-    Super mode ignores priority ordering — all providers run concurrently.
-    Per-provider timeouts are enforced. Results merged via dedup_and_rank.
-    """
-    affinity = kwargs.pop("affinity", "general")
-    candidates = select_providers(_registry.get_ordered(), _breaker, affinity=affinity)
-
-    if not candidates:
-        return None
-
-    async def _timed_search(provider):
-        try:
-            return await asyncio.wait_for(
-                provider.search(query, max_results, **kwargs),
-                timeout=provider.timeout_seconds,
-            )
-        except asyncio.TimeoutError:
-            _breaker.record_failure(provider.name)
-            log(f"super: {provider.name} timed out after {provider.timeout_seconds}s")
-            return None
-        except Exception as e:
-            _breaker.record_failure(provider.name)
-            log(f"super: {provider.name} failed: {e}")
-            return None
-
-    tasks = [_timed_search(c.provider) for c in candidates]
-    search_results = await asyncio.gather(*tasks)
-
-    results_by_provider = {}
-    answer = None
-
-    for c, sr in zip(candidates, search_results):
-        p = c.provider
-        if sr and sr.results:
-            results_by_provider[p.name] = sr.results
-            _quota.record_usage(p.name)
-            _breaker.record_success(p.name)
-            _call_counter.increment(p.name)
-            log(f"super: {p.name} returned {len(sr.results)} results")
-            if sr.answer and not answer:
-                answer = sr.answer
-        elif sr is None:
-            log(f"super: {p.name} returned nothing")
-
-    if not results_by_provider:
-        return None
-
-    merged, providers_used = dedup_and_rank(results_by_provider, max_results)
-    return SearchResult(
-        results=merged,
-        provider=",".join(providers_used),
-        answer=answer,
-    )
-
-
 _TIME_SENSITIVE_PATTERN = _re.compile(
     r'(?:\b(?:latest|recent|newest|current|202[4-9]|this\s+year)\b|今年|最新|最近)', _re.IGNORECASE)
 _NEWS_PATTERN = _re.compile(
@@ -245,14 +186,16 @@ def _format_content_results(results, query):
 def _build_failure_suggestions(failures):
     """Generate actionable suggestions based on failure patterns."""
     suggestions = []
-    error_texts = " ".join(f.get("error", "") for f in failures).lower()
+    error_texts = " ".join(
+        f"{f.get('error', '')} {f.get('state', '')}" for f in failures
+    ).lower()
 
     if "api key" in error_texts or "no tavily" in error_texts or "no brave" in error_texts:
         suggestions.append("Configure API keys via plugin settings (Tavily, Brave, or Gemini)")
-    if "timeout" in error_texts or "connection" in error_texts:
+    if "timeout" in error_texts or "connection" in error_texts or "tcp_failure" in error_texts:
         suggestions.append("Check network connectivity or configure proxies in config/proxies.yaml")
-    if "rate" in error_texts or "429" in error_texts or "quota" in error_texts:
-        suggestions.append("Provider rate-limited — wait and retry, or switch providers")
+    if "rate" in error_texts or "429" in error_texts or "quota" in error_texts or "circuit_open" in error_texts:
+        suggestions.append("Provider rate-limited or in cooldown — wait and retry, or switch providers")
     if not suggestions:
         suggestions.append("Run WebSearchConfig status to check provider health")
     return suggestions
@@ -324,6 +267,7 @@ async def WebSearch(
         search_kwargs = _apply_smart_defaults(query, search_kwargs)
 
         # include_content mode: try Brave LLM Context first (search + content in one call)
+        content_downgrade_reason = None
         if include_content and not news:
             freshness_map = {"d": "pd", "w": "pw", "m": "pm", "y": "py"}
             freshness = freshness_map.get(search_kwargs.get("timelimit", ""))
@@ -341,17 +285,24 @@ async def WebSearch(
                 if results:
                     _breaker.record_success("brave")
                     return _format_content_results(results, query)
-            if llm_result is not None:
                 _breaker.record_success("brave")
+                content_downgrade_reason = "Brave LLM Context returned no results"
             else:
                 _breaker.record_failure("brave")
+                content_downgrade_reason = "Brave LLM Context unavailable"
+        elif include_content and news:
+            content_downgrade_reason = "include_content not supported in news mode"
 
         sr = None
 
         if super_mode:
             max_results = max(1, min(max_results, 20))
             search_kwargs["include_answer"] = True
-            sr = await _search_super_with_registry(query, max_results, **search_kwargs)
+            affinity = search_kwargs.pop("affinity", "general")
+            sr = await execute_super_search(
+                query, max_results, _registry.get_ordered(), _breaker,
+                affinity=affinity, **search_kwargs,
+            )
             if sr and (include_domains or exclude_domains):
                 sr.results = _filter_by_domains(sr.results, include_domains, exclude_domains)
         else:
@@ -367,7 +318,7 @@ async def WebSearch(
                 "suggestions": _build_failure_suggestions(failures),
             }, indent=2)
 
-        return to_markdown(sr.results, query, sr.answer, sr.provider)
+        return to_markdown(sr.results, query, sr.answer, sr.provider, content_downgrade_reason)
 
     except Exception as e:
         return json.dumps({"error": str(e), "query": query})
@@ -376,23 +327,19 @@ async def WebSearch(
 @mcp.tool
 async def WebFetch(
     url: str | list[str],
-    prompt: str,
     query: str | None = None,
     max_chars: int | None = None,
 ) -> str:
     """Fetch and extract content from a URL. Uses trafilatura with Next.js/Nuxt.js SPA fallback.
     Connection failover: direct -> configured proxies.
 
-    The prompt is returned alongside the extracted content for the model to apply.
-    No server-side filtering or summarization is performed — the calling model should
-    use the prompt to focus on the relevant parts of the returned content.
+    No server-side filtering or summarization is performed.
 
     No JavaScript execution. Content truncated at 100K characters.
     Binary content (images, PDFs, zips) is detected and rejected with a descriptive message.
 
     Args:
         url: The URL to fetch content from (http/https only, auto-upgrades http to https)
-        prompt: Passed through alongside content — the server does NOT filter. Apply the prompt yourself
         query: Optional relevance query — when set, JS fallback renderers use it for focused extraction
         max_chars: Override default content truncation limit (default: from config or 100K)
     """
@@ -448,7 +395,7 @@ async def WebFetch(
             u, content, error = final_contents[0] if final_contents else (urls[0], None, "unknown error")
             if error:
                 return json.dumps({"error": error, "url": u})
-            return f"Source: {u}\nExtraction prompt: {prompt}\n\n---\n\n{content}"
+            return f"Source: {u}\n\n---\n\n{content}"
 
         # Batch mode — structured multi-URL output
         parts = []
@@ -459,7 +406,7 @@ async def WebFetch(
                 parts.append(f"## {u}\n\n{content}")
 
         extracted_count = len([c for _, c, e in final_contents if c])
-        header = f"Extraction prompt: {prompt}\nURLs extracted: {extracted_count}/{len(valid_urls)}"
+        header = f"URLs extracted: {extracted_count}/{len(valid_urls)}"
         return f"{header}\n\n---\n\n" + "\n\n---\n\n".join(parts)
 
     except Exception as e:
@@ -482,12 +429,14 @@ async def WebSearchConfig(
     if action == "reload":
         _registry.reload()
         proxies = reload_proxies()
+        _breaker.reset_all()
         providers = _registry.get_all()
         return json.dumps({
             "action": "reload",
             "providers_loaded": len(providers),
             "proxies_loaded": len(proxies),
             "providers_config": _registry.config_source,
+            "breaker": "reset",
         }, indent=2)
 
     # status

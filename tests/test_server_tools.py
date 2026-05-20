@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from pivot_web_search_mcp import server
 from pivot_web_search_mcp.providers import SearchProvider, SearchResult
+from pivot_web_search_mcp.routing import execute_super_search
 
 
 class TestWebSearch:
@@ -41,7 +42,7 @@ class TestWebSearch:
         assert "Good" in result
         assert "good.com" in result
 
-    @patch.object(server, '_search_super_with_registry', new_callable=AsyncMock)
+    @patch.object(server, 'execute_super_search', new_callable=AsyncMock)
     async def test_super_mode(self, mock_super):
         mock_super.return_value = SearchResult(
             results=[{"title": "Multi", "url": "https://m.com", "snippet": "x"}],
@@ -220,8 +221,7 @@ def _mk_results(n, prefix="r"):
 
 
 class TestSuperMode:
-    @patch.object(server._registry, 'get_ordered')
-    async def test_super_mode_runs_providers_in_parallel(self, mock_ordered):
+    async def test_super_mode_runs_providers_in_parallel(self):
         # Two providers each delayed 200ms — sequential would be ~400ms,
         # parallel should finish closer to 200ms. Ceiling 350ms catches
         # accidental serialization (e.g. awaiting one before launching the next).
@@ -229,29 +229,25 @@ class TestSuperMode:
             _SuperFakeProvider("p1", _mk_results(2, prefix="p1_"), delay=0.2),
             _SuperFakeProvider("p2", _mk_results(2, prefix="p2_"), delay=0.2),
         ]
-        mock_ordered.return_value = providers
         start = time.monotonic()
-        sr = await server._search_super_with_registry("q", 5)
+        sr = await execute_super_search("q", 5, providers, server._breaker)
         elapsed = time.monotonic() - start
         assert sr is not None
         assert elapsed < 0.35, f"super mode appears serial: took {elapsed:.3f}s for two 0.2s providers"
 
-    @patch.object(server._registry, 'get_ordered')
-    async def test_super_mode_isolates_provider_exceptions(self, mock_ordered):
+    async def test_super_mode_isolates_provider_exceptions(self):
         providers = [
             _SuperFakeProvider("bad", raise_exc=RuntimeError("boom")),
             _SuperFakeProvider("good1", _mk_results(2, prefix="g")),
             _SuperFakeProvider("good2", _mk_results(2, prefix="h")),
         ]
-        mock_ordered.return_value = providers
-        sr = await server._search_super_with_registry("q", 5)
+        sr = await execute_super_search("q", 5, providers, server._breaker)
         assert sr is not None
         assert sr.results
         urls = [r["url"] for r in sr.results]
         assert any("g" in u or "h" in u for u in urls)
 
-    @patch.object(server._registry, 'get_ordered')
-    async def test_super_mode_per_provider_timeout(self, mock_ordered):
+    async def test_super_mode_per_provider_timeout(self):
         # Provider A would block for 5s if not timed out, but its configured
         # timeout is 0.2s. Provider B returns immediately. Total wall time must
         # stay near A's timeout window — never approach A's 5s delay — proving
@@ -260,9 +256,8 @@ class TestSuperMode:
             _SuperFakeProvider("slow", _mk_results(2, prefix="slow"), delay=5.0, timeout=0.2),
             _SuperFakeProvider("fast", _mk_results(2, prefix="fast"), timeout=2.0),
         ]
-        mock_ordered.return_value = providers
         start = time.monotonic()
-        sr = await server._search_super_with_registry("q", 5)
+        sr = await execute_super_search("q", 5, providers, server._breaker)
         elapsed = time.monotonic() - start
 
         assert sr is not None
@@ -272,15 +267,13 @@ class TestSuperMode:
         # Hard ceiling well below A's 5s delay: timeout (0.2s) + slack for scheduling.
         assert elapsed < 1.0, f"slow provider blocked the gather: took {elapsed:.3f}s"
 
-    @patch.object(server._registry, 'get_ordered')
-    async def test_super_mode_records_breaker_state(self, mock_ordered):
+    async def test_super_mode_records_breaker_state(self):
         providers = [
             _SuperFakeProvider("crash", raise_exc=RuntimeError("boom")),
             _SuperFakeProvider("ok", _mk_results(1, prefix="o")),
         ]
-        mock_ordered.return_value = providers
         with patch.object(server._breaker, "record_failure") as mock_fail:
-            await server._search_super_with_registry("q", 5)
+            await execute_super_search("q", 5, providers, server._breaker)
             failed_names = [c.args[0] for c in mock_fail.call_args_list]
             assert "crash" in failed_names
 

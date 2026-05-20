@@ -19,6 +19,8 @@ DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 class LlmSearchFormat(ABC):
     """Abstract base for LLM search request/response formats."""
 
+    auth_style: str = "bearer"
+
     @abstractmethod
     def build_request(self, query, max_results, config) -> tuple[str, dict, bytes]:
         """Build HTTP request components.
@@ -223,6 +225,8 @@ class ResponsesFormat(LlmSearchFormat):
 
 class GeminiFormat(LlmSearchFormat):
     """Format for Google Gemini generateContent with Search grounding."""
+
+    auth_style = "x-goog-api-key"
 
     def build_request(self, query, max_results, config):
         base_url = config.get("gemini_url", DEFAULT_GEMINI_URL)

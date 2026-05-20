@@ -367,6 +367,21 @@ def is_exhausted(provider_name):
     return entry.get("used", 0) >= limit
 
 
+def retry_after_seconds(provider_name):
+    """Seconds remaining until the rate-limit window expires, or None if not rate-limited."""
+    data = load_quota()
+    entry = data.get(provider_name, {})
+    exhausted_until = entry.get("exhausted_until")
+    if not exhausted_until:
+        return None
+    try:
+        deadline = datetime.fromisoformat(exhausted_until)
+    except (ValueError, TypeError):
+        return None
+    remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
+    return max(0, int(remaining)) if remaining > 0 else None
+
+
 def would_exhaust_on_next_use(provider_name):
     """Return True when one more call would leave the provider exhausted."""
     data = load_quota()

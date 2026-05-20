@@ -38,6 +38,20 @@ def load_yaml(path):
         return _yaml.safe_load(f)
 
 
+def cache_still_valid(path: pathlib.Path, cached_mtime: float) -> bool:
+    """True when a cached value can be reused: file missing, or mtime not newer than cache.
+
+    OSError is treated as cache-still-valid so a transient stat failure
+    doesn't force a full reparse.
+    """
+    try:
+        if not path.exists():
+            return True
+        return path.stat().st_mtime <= cached_mtime
+    except OSError:
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Proxies
 # ---------------------------------------------------------------------------
@@ -74,15 +88,8 @@ def load_proxies(config_path=None):
     path = pathlib.Path(config_path) if config_path else PROXIES_YAML
 
     with _proxies_lock:
-        if _proxies_list is not None:
-            try:
-                if path.exists():
-                    if path.stat().st_mtime <= _proxies_mtime:
-                        return _proxies_list
-                else:
-                    return _proxies_list
-            except Exception:
-                return _proxies_list
+        if _proxies_list is not None and cache_still_valid(path, _proxies_mtime):
+            return _proxies_list
 
         env_proxies = _load_proxies_from_env()
         if env_proxies is not None:
@@ -165,15 +172,8 @@ def load_fetch_config(config_path=None):
 
     path = pathlib.Path(config_path) if config_path else FETCH_YAML
 
-    if _fetch_config is not None:
-        try:
-            if path.exists():
-                if path.stat().st_mtime <= _fetch_config_mtime:
-                    return _fetch_config
-            else:
-                return _fetch_config
-        except Exception:
-            return _fetch_config
+    if _fetch_config is not None and cache_still_valid(path, _fetch_config_mtime):
+        return _fetch_config
 
     with _fetch_config_lock:
         if _fetch_config is not None:
