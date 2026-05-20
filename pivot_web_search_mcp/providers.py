@@ -19,16 +19,8 @@ import httpx
 
 from . import quota
 from .backends import search_brave, search_ddg, search_tavily
-from .config import (  # noqa: F401 — re-exported for tests/back-compat
-    PROVIDERS_YAML as _PROVIDERS_YAML,
-    get_fetch_config_source,
-    get_proxy_config_source,
-    load_fetch_config,
-    load_proxies,
-    load_yaml as _load_yaml,
-    reload_fetch_config,
-    reload_proxies,
-)
+from .config import PROVIDERS_YAML as _PROVIDERS_YAML
+from .config import load_yaml as _load_yaml
 from .defaults import DEFAULT_TIMEOUT, SMART_DEFAULT_PRIORITY
 from .http_client import _get_client, _open_with_fallback
 from .logging import log

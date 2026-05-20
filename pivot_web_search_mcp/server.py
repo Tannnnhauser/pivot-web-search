@@ -32,7 +32,15 @@ from .extraction import extract_trafilatura
 from .logging import log
 from .providers import ProviderRegistry, SearchResult
 from .results import dedup_and_rank, to_markdown
-from .routing import CircuitBreaker, FailureInfo, ScoredProvider, attempt_single, _call_counter, execute_search, select_providers
+from .routing import (
+    CircuitBreaker,
+    FailureInfo,
+    ScoredProvider,
+    _call_counter,
+    attempt_single,
+    execute_search,
+    select_providers,
+)
 from .validation import MAX_CONTENT_CHARS, validate_url
 
 

@@ -1,7 +1,7 @@
 
 import pytest
 
-from pivot_web_search_mcp import config, extraction, http_client, providers, quota, routing, server
+from pivot_web_search_mcp import config, extraction, http_client, quota, routing, server
 
 
 @pytest.fixture(autouse=True)
