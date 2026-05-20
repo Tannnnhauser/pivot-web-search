@@ -242,7 +242,11 @@ pivot-web-search/
 │   ├── validation.py        # URL/SSRF validation
 │   ├── config.py            # YAML config loaders (hot-reload)
 │   ├── defaults.py          # Smart-defaults priority table
-│   ├── providers.py         # ProviderRegistry, adapters, config loaders
+│   ├── providers/           # Provider subpackage
+│   │   ├── __init__.py      # Public re-exports
+│   │   ├── base.py          # SearchProvider, SearchResult
+│   │   ├── adapters.py      # 6 adapters (Ddg/Tavily/Brave/LlmSearch/Searxng/JsonApi) + ADAPTER_MAP
+│   │   └── registry.py      # ProviderRegistry with mtime reload
 │   ├── llm_search_formats.py # Strategy pattern for LLM search API formats
 │   ├── routing.py           # Priority-group routing, hedging, circuit breaker
 │   ├── quality_gate.py      # 3-tier quality gate (answer/URLs/keywords)
@@ -267,4 +271,4 @@ pivot-web-search/
 9. **Provider affinity** — deep research providers excluded from normal routing unless explicitly requested
 10. **Security by default** — SSRF protection, pre-redirect blocking, credential redaction
 11. **Cross-platform** — filelock instead of fcntl, works on Windows/macOS/Linux
-12. **Async-safe** — shared mutable state protected by `asyncio.Lock`; config loaders use `threading.Lock`
+12. **Async-safe** — single-threaded asyncio, no thread locks; config loaders use mtime caching (`cache_still_valid`)

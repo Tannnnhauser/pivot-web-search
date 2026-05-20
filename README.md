@@ -384,7 +384,7 @@ pivot_web_search_mcp/         FastMCP server (stdio) — fully async, exposes 3 
   validation.py         URL/SSRF validation
   config.py             YAML config loaders (hot-reload)
   defaults.py           Smart-defaults priority table
-  providers.py          Async provider adapters, registry, smart defaults, config source tracking
+  providers/            Subpackage: base (SearchProvider/SearchResult), adapters (6 built-ins + ADAPTER_MAP), registry (mtime hot-reload)
   llm_search_formats.py Strategy pattern for LLM search API formats (chat_completions, responses, gemini)
   fetch.py              SPA detection, async JS renderer dispatch (Playwright/Tavily)
   quota.py              Cross-session quota tracking (filelock, cross-platform)
