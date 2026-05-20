@@ -394,7 +394,7 @@ config/                 YAML config for providers, proxies, and fetch (hot-reloa
 scripts/
   health-check.py       Startup probe — reports provider availability and quota
   pretool-check.py      PreToolUse hook script — fail-open tool blocker
-tests/                  305 tests across 15 modules (pytest-asyncio)
+tests/                  312 tests across 15 modules (305 offline + 7 live integration, pytest-asyncio)
 ```
 
 ## Testing
@@ -402,7 +402,7 @@ tests/                  305 tests across 15 modules (pytest-asyncio)
 ```sh
 uv sync --extra dev                   # install dev dependencies
 pytest -m "not integration"           # 305 offline tests (~5s)
-pytest                                # all tests including live API integration (requires API keys)
+pytest                                # 312 total (7 live integration, requires BRAVE/TAVILY keys)
 ```
 
 ## Troubleshooting
