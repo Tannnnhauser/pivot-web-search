@@ -38,6 +38,14 @@ class TestQualityGate:
         result = quality_gate("quantum computing advances", results)
         assert result == Verdict.PARTIAL
 
+    def test_title_only_keyword_overlap_is_partial(self):
+        results = [
+            {"url": "https://a.com", "title": "Best Python Tutorial 2026", "snippet": "Click here for top picks"},
+            {"url": "https://b.com", "title": "Python Tutorial Rankings", "snippet": "Sponsored listing with offers"},
+        ]
+        result = quality_gate("python tutorial", results)
+        assert result == Verdict.PARTIAL
+
     def test_accept_on_answer_exactly_40_chars(self):
         answer = "A" * 40
         result = quality_gate("test", [], answer=answer)

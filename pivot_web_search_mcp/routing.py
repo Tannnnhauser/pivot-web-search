@@ -327,18 +327,32 @@ async def execute_search(
                 rr_seed=getattr(recovery, "_rr_seed", 0),
             )]
         else:
-            return FailureInfo(failures=[{"provider": "all", "error": "all providers unavailable"}])
+            cooldown_candidates = []
+            for p in providers:
+                if not p.enabled:
+                    continue
+                if getattr(p, "affinity", "general") == "deep" and affinity != "deep":
+                    continue
+                if affinity == "deep" and getattr(p, "affinity", "general") not in ("general", "deep"):
+                    continue
+                if _quota.is_exhausted(p.name):
+                    continue
+                cooldown_candidates.append(p)
+            error = "all providers in cooldown" if cooldown_candidates else "all providers unavailable"
+            return FailureInfo(failures=[{"provider": "all", "error": error}])
 
     groups = build_priority_groups(candidates)
     best_so_far = None
     failures: list[dict] = []
     consecutive_tcp_failures = 0
 
-    deadline = time.time() + _effective_budget(groups)
+    budget_s = _effective_budget(groups)
+    started_at = time.monotonic()
 
     for group in groups:
-        if time.time() >= deadline:
-            log(f"BUDGET exceeded after {len(failures)} failures, stopping")
+        elapsed_s = time.monotonic() - started_at
+        if elapsed_s >= budget_s:
+            log(f"BUDGET exceeded after {elapsed_s:.2f}s and {len(failures)} failures, stopping")
             break
 
         group_result = await _execute_priority_group(group, query, max_results, breaker, **kwargs)
@@ -415,6 +429,15 @@ async def attempt_single(
         breaker.record_failure(p.name)
         log(f"{p.name} timed out after {timeout}s")
         return _AttemptResult(provider_name=p.name, error="timeout")
+    except httpx.HTTPStatusError as e:
+        retry_after = e.response.headers.get("Retry-After") if e.response is not None else None
+        if e.response is not None and e.response.status_code == 429 and retry_after:
+            _quota.mark_rate_limited(p.name, retry_after)
+            log(f"{p.name} rate limited; quota exhausted until Retry-After")
+            return _AttemptResult(provider_name=p.name, error="rate_limited")
+        breaker.record_failure(p.name)
+        log(f"{p.name} http failure: {e}")
+        return _AttemptResult(provider_name=p.name, error=str(e))
     except (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError, OSError) as e:
         breaker.record_failure(p.name)
         log(f"{p.name} tcp failure: {e}")
@@ -446,6 +469,9 @@ async def _attempt_hedged(
     async def _delayed_attempt(scored: ScoredProvider, delay_ms: int):
         if delay_ms > 0:
             await asyncio.sleep(delay_ms / 1000.0)
+            if _quota.would_exhaust_on_next_use(scored.provider.name):
+                log(f"SKIP {scored.provider.name}: hedge would exhaust quota")
+                return _AttemptResult(provider_name=scored.provider.name, error="hedge_skipped_quota")
         return await attempt_single(scored, query, max_results, breaker, **kwargs)
 
     tasks: dict[asyncio.Task, ScoredProvider] = {}
@@ -511,9 +537,7 @@ async def _attempt_hedged(
 
 
 def pick_recovery_candidate(providers, breaker: CircuitBreaker, affinity: str = "general"):
-    """All-OPEN fallback: find OPEN provider closest to cooldown expiry, force HALF_OPEN."""
-    best = None
-    best_time = float("inf")
+    """Return an already-available provider, never force an OPEN one back into service."""
 
     for p in providers:
         if not p.enabled:
@@ -524,13 +548,7 @@ def pick_recovery_candidate(providers, breaker: CircuitBreaker, affinity: str = 
             continue
         if _quota.is_exhausted(p.name):
             continue
-        if breaker.get_state(p.name) != BreakerState.OPEN:
-            continue
-        remaining = breaker.time_until_recovery(p.name)
-        if remaining < best_time:
-            best = p
-            best_time = remaining
-
-    if best is not None:
-        breaker.force_half_open(best.name)
-    return best
+        state = breaker.get_state(p.name)
+        if state in (BreakerState.CLOSED, BreakerState.HALF_OPEN):
+            return p
+    return None

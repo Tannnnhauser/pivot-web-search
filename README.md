@@ -4,7 +4,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
-[![Tests: 306](https://img.shields.io/badge/tests-306%20passing-brightgreen.svg)]()
+[![Tests: 305](https://img.shields.io/badge/tests-305%20passing-brightgreen.svg)]()
 
 ## What Is This?
 
@@ -13,7 +13,7 @@ Claude Code users on **Amazon Bedrock** (or other API providers) don't get Anthr
 ## Key Features
 
 - **Priority-group routing** — providers grouped by priority and executed with hedged requests. Same-priority providers fire concurrently with 200ms stagger; first quality-gate pass wins. Groups tried sequentially from highest to lowest priority.
-- **Smart defaults** — quality-first ordering (LLM Search > Tavily/Brave > SearXNG > Gemini > DDG) applied automatically. No manual priority tuning needed for common setups.
+- **Smart defaults** — quality-first ordering (LLM Search > Tavily/Brave/Gemini > SearXNG/json_api > DDG) applied automatically. No manual priority tuning needed for common setups.
 - **3-tier quality gate** — AI answer presence, URL count, and keyword overlap drive automatic failover decisions. Partial results are kept as fallback while better sources are tried.
 - **Circuit breaker** — per-provider health tracking. After 3 consecutive failures, a provider is temporarily bypassed (60s cooldown) with automatic recovery probing.
 - **Super mode** — queries all providers in parallel, deduplicates by URL, and ranks by cross-provider agreement.
@@ -205,7 +205,7 @@ providers:
     type: gemini
     api_key_env: GEMINI_SEARCH_API_KEY
     model: gemini-2.5-flash
-    # priority: 40 (smart default)
+    # priority: 20 (smart default — hedged with tavily/brave)
     # timeout: 20 (smart default)
 
   - name: ddg
@@ -338,10 +338,9 @@ Request
   │
   ├─ normal mode: priority-group routing
   │   ┌─ Group 1 (priority 10): LLM Search (Perplexity, OpenAI, etc.)
-  │   ├─ Group 2 (priority 20): Tavily + Brave ← hedged (200ms stagger, first quality-gate pass wins)
+  │   ├─ Group 2 (priority 20): Tavily + Brave + Gemini ← hedged (200ms stagger, first quality-gate pass wins)
   │   ├─ Group 3 (priority 30): SearXNG / json_api
-  │   ├─ Group 4 (priority 40): Gemini
-  │   └─ Group 5 (priority 90): DDG (free exhaustion fallback)
+  │   └─ Group 4 (priority 90): DDG (free exhaustion fallback)
   │
   │   Gates: quota-exhausted → skip | circuit-open → skip | affinity mismatch → skip
   │   Quality gate (3-tier): AI answer ≥40 chars? → unique URLs ≥2? → keyword overlap?
@@ -378,7 +377,13 @@ pivot_web_search_mcp/         FastMCP server (stdio) — fully async, exposes 3 
   server.py             Async tool handlers, failover orchestration, smart defaults
   routing.py            Priority-group routing, hedged execution, circuit breaker, quality gate
   quality_gate.py       3-tier quality gate (answer/URLs/keywords)
-  search.py             Async search backends (httpx), URL extraction, proxy failover, dedup_and_rank
+  backends.py           Async search backends (DDG/Tavily/Brave/Gemini, httpx)
+  extraction.py         trafilatura wrapper for URL content extraction
+  http_client.py        Shared httpx client + proxy failover
+  results.py            dedup_and_rank, markdown rendering
+  validation.py         URL/SSRF validation
+  config.py             YAML config loaders (hot-reload)
+  defaults.py           Smart-defaults priority table
   providers.py          Async provider adapters, registry, smart defaults, config source tracking
   llm_search_formats.py Strategy pattern for LLM search API formats (chat_completions, responses, gemini)
   fetch.py              SPA detection, async JS renderer dispatch (Playwright/Tavily)
@@ -389,14 +394,14 @@ config/                 YAML config for providers, proxies, and fetch (hot-reloa
 scripts/
   health-check.py       Startup probe — reports provider availability and quota
   pretool-check.py      PreToolUse hook script — fail-open tool blocker
-tests/                  306 tests across 15 modules (pytest-asyncio)
+tests/                  305 tests across 15 modules (pytest-asyncio)
 ```
 
 ## Testing
 
 ```sh
 uv sync --extra dev                   # install dev dependencies
-pytest -m "not integration"           # 306 offline tests (~5s)
+pytest -m "not integration"           # 305 offline tests (~5s)
 pytest                                # all tests including live API integration (requires API keys)
 ```
 

@@ -2,9 +2,10 @@
 
 import asyncio
 import json
+import time
 from unittest.mock import AsyncMock, patch
 
-from pivot_web_search_mcp import routing, server
+from pivot_web_search_mcp import server
 from pivot_web_search_mcp.providers import SearchProvider, SearchResult
 
 
@@ -220,16 +221,20 @@ def _mk_results(n, prefix="r"):
 
 class TestSuperMode:
     @patch.object(server._registry, 'get_ordered')
-    async def test_super_mode_increments_call_counter(self, mock_ordered):
+    async def test_super_mode_runs_providers_in_parallel(self, mock_ordered):
+        # Two providers each delayed 200ms — sequential would be ~400ms,
+        # parallel should finish closer to 200ms. Ceiling 350ms catches
+        # accidental serialization (e.g. awaiting one before launching the next).
         providers = [
-            _SuperFakeProvider("p1", _mk_results(2)),
-            _SuperFakeProvider("p2", _mk_results(2)),
+            _SuperFakeProvider("p1", _mk_results(2, prefix="p1_"), delay=0.2),
+            _SuperFakeProvider("p2", _mk_results(2, prefix="p2_"), delay=0.2),
         ]
         mock_ordered.return_value = providers
+        start = time.monotonic()
         sr = await server._search_super_with_registry("q", 5)
+        elapsed = time.monotonic() - start
         assert sr is not None
-        assert routing._call_counter.value("p1") == 1
-        assert routing._call_counter.value("p2") == 1
+        assert elapsed < 0.35, f"super mode appears serial: took {elapsed:.3f}s for two 0.2s providers"
 
     @patch.object(server._registry, 'get_ordered')
     async def test_super_mode_isolates_provider_exceptions(self, mock_ordered):
@@ -247,16 +252,25 @@ class TestSuperMode:
 
     @patch.object(server._registry, 'get_ordered')
     async def test_super_mode_per_provider_timeout(self, mock_ordered):
+        # Provider A would block for 5s if not timed out, but its configured
+        # timeout is 0.2s. Provider B returns immediately. Total wall time must
+        # stay near A's timeout window — never approach A's 5s delay — proving
+        # one slow provider cannot stall the others.
         providers = [
-            _SuperFakeProvider("slow", _mk_results(2, prefix="slow"), delay=0.3, timeout=0.05),
+            _SuperFakeProvider("slow", _mk_results(2, prefix="slow"), delay=5.0, timeout=0.2),
             _SuperFakeProvider("fast", _mk_results(2, prefix="fast"), timeout=2.0),
         ]
         mock_ordered.return_value = providers
+        start = time.monotonic()
         sr = await server._search_super_with_registry("q", 5)
+        elapsed = time.monotonic() - start
+
         assert sr is not None
         urls = " ".join(r["url"] for r in sr.results)
-        assert "fast" in urls
-        assert "slow" not in urls
+        assert "fast" in urls, "fast provider's results should be returned"
+        assert "slow" not in urls, "timed-out provider's results must not leak in"
+        # Hard ceiling well below A's 5s delay: timeout (0.2s) + slack for scheduling.
+        assert elapsed < 1.0, f"slow provider blocked the gather: took {elapsed:.3f}s"
 
     @patch.object(server._registry, 'get_ordered')
     async def test_super_mode_records_breaker_state(self, mock_ordered):
@@ -280,23 +294,37 @@ class TestSmartDefaults:
         out = server._apply_smart_defaults("今年的最新新闻", {"timelimit": None, "news": None})
         assert out["timelimit"] == "m"
 
-    def test_non_time_sensitive_untouched(self):
-        out = server._apply_smart_defaults("how does photosynthesis work", {"timelimit": None, "news": None})
+    def test_news_only_query_sets_news_but_not_timelimit(self):
+        # Behavioral: query matches only the news pattern, not the
+        # time-sensitive pattern. The function must apply news=True while
+        # leaving timelimit=None — proving the two detectors are independent.
+        out = server._apply_smart_defaults(
+            "breaking news on quantum mechanics", {"timelimit": None, "news": None})
+        assert out["news"] is True
         assert out["timelimit"] is None
-        assert out["news"] is None
 
     def test_news_mode_detection(self):
         out = server._apply_smart_defaults("breaking news on election", {"timelimit": None, "news": None})
         assert out["news"] is True
 
-    def test_does_not_mutate_input(self):
+    def test_returns_new_dict_with_modifications_applied(self):
+        # Behavioral: the function must (a) return a fresh dict, not the input,
+        # and (b) the fresh dict must reflect the smart-defaults transformation.
+        # A pass-through stub that returned the input unchanged would fail both.
         kwargs = {"timelimit": None, "news": None}
-        server._apply_smart_defaults("latest news on AI", kwargs)
-        assert kwargs == {"timelimit": None, "news": None}
+        out = server._apply_smart_defaults("latest news on AI", kwargs)
+        assert out is not kwargs, "should return a copy, not mutate caller's dict"
+        assert out["timelimit"] == "m"
+        assert kwargs["timelimit"] is None, "caller's dict must not be mutated"
 
-    def test_explicit_timelimit_preserved(self):
-        out = server._apply_smart_defaults("latest news", {"timelimit": "d", "news": None})
-        assert out["timelimit"] == "d"
+    def test_explicit_timelimit_preserved_while_news_still_applied(self):
+        # Behavioral: with timelimit explicitly set, the function must NOT
+        # overwrite it — but it must still apply news=True from the news
+        # pattern. A pass-through stub would return news=None and fail.
+        out = server._apply_smart_defaults(
+            "latest breaking news", {"timelimit": "d", "news": None})
+        assert out["timelimit"] == "d", "explicit timelimit must be preserved"
+        assert out["news"] is True, "news default must still be applied"
 
 
 class TestExplicitProviderFailure:

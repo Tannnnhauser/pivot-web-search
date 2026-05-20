@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 from pivot_web_search_mcp import server
 from pivot_web_search_mcp.providers import SearchProvider, SearchResult
+from pivot_web_search_mcp.results import dedup_and_rank
 
 
 class FakeProvider(SearchProvider):
@@ -113,14 +114,12 @@ class TestSearchWithRegistry:
 
 class TestDedupAndRank:
     def test_single_provider(self):
-        from pivot_web_search_mcp.search import dedup_and_rank
         results_by_provider = {"ddg": _make_results(3)}
         merged, providers_used = dedup_and_rank(results_by_provider, 10)
         assert len(merged) == 3
         assert providers_used == ["ddg"]
 
     def test_two_providers_overlap(self):
-        from pivot_web_search_mcp.search import dedup_and_rank
         results_by_provider = {
             "ddg": [{"title": "A", "url": "https://a.com/page", "snippet": "short"}],
             "tavily": [{"title": "A Long", "url": "https://a.com/page", "snippet": "longer snippet here"}],
@@ -132,7 +131,6 @@ class TestDedupAndRank:
         assert set(merged[0]["_providers"]) == {"ddg", "tavily"}
 
     def test_gemini_opaque_url(self):
-        from pivot_web_search_mcp.search import dedup_and_rank
         results_by_provider = {
             "gemini": [{"title": "Python Docs", "url": "https://vertexaisearch.cloud.google.com/x", "snippet": "s"}],
             "ddg": [{"title": "Python Docs", "url": "https://vertexaisearch.cloud.google.com/y", "snippet": "longer"}],
@@ -142,13 +140,11 @@ class TestDedupAndRank:
         assert "longer" in merged[0]["snippet"]
 
     def test_max_results_respected(self):
-        from pivot_web_search_mcp.search import dedup_and_rank
         results_by_provider = {"ddg": _make_results(10)}
         merged, _ = dedup_and_rank(results_by_provider, 3)
         assert len(merged) == 3
 
     def test_ranking_by_provider_count(self):
-        from pivot_web_search_mcp.search import dedup_and_rank
         results_by_provider = {
             "ddg": [
                 {"title": "Multi", "url": "https://multi.com", "snippet": "s"},

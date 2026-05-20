@@ -17,6 +17,7 @@ import os
 import pathlib
 import time
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
 
 from filelock import FileLock
@@ -117,6 +118,19 @@ def _ensure_period(data, provider):
     return data
 
 
+def _normalize_exhausted_until(entry):
+    exhausted_until = entry.get("exhausted_until")
+    if not exhausted_until:
+        return
+    try:
+        exhausted_dt = datetime.fromisoformat(exhausted_until)
+    except (ValueError, TypeError):
+        entry.pop("exhausted_until", None)
+        return
+    if exhausted_dt <= datetime.now(timezone.utc):
+        entry.pop("exhausted_until", None)
+
+
 def load_quota():
     """Load full quota state, auto-resetting stale periods. Cached for 5s."""
     global _quota_cache, _quota_cache_ts
@@ -127,6 +141,7 @@ def load_quota():
     changed = False
     for provider in list(data.keys()):
         entry = data[provider]
+        _normalize_exhausted_until(entry)
         period = entry.get("period", "monthly")
         needs_reset = False
         if period == "daily":
@@ -295,6 +310,36 @@ def set_provider_limit(provider_name, limit, period="monthly"):
     _write_file(data)
 
 
+def mark_rate_limited(provider_name, retry_after):
+    """Mark a provider unavailable until its Retry-After deadline."""
+    if not retry_after:
+        return False
+
+    now = datetime.now(timezone.utc)
+    exhausted_until = None
+
+    try:
+        delay_s = int(str(retry_after).strip())
+        exhausted_until = now + timedelta(seconds=max(delay_s, 0))
+    except (TypeError, ValueError):
+        try:
+            parsed = parsedate_to_datetime(str(retry_after).strip())
+            exhausted_until = parsed.astimezone(timezone.utc)
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return False
+
+    if exhausted_until is None or exhausted_until <= now:
+        return False
+
+    data = _read_file()
+    _ensure_period(data, provider_name)
+    data[provider_name]["exhausted_until"] = exhausted_until.isoformat()
+    _write_file(data)
+    global _quota_cache
+    _quota_cache = None
+    return True
+
+
 def get_usage_pct(provider_name):
     """Return usage percentage (0.0–100.0+). Returns 0.0 if no limit configured."""
     data = load_quota()
@@ -310,10 +355,35 @@ def is_exhausted(provider_name):
     """Return True if provider has hit or exceeded its quota limit."""
     data = load_quota()
     entry = data.get(provider_name, {})
+    exhausted_until = entry.get("exhausted_until")
+    if exhausted_until:
+        try:
+            if datetime.fromisoformat(exhausted_until) > datetime.now(timezone.utc):
+                return True
+        except (ValueError, TypeError):
+            pass
     limit = entry.get("limit")
     if not limit or limit <= 0:
         return False
     return entry.get("used", 0) >= limit
+
+
+def would_exhaust_on_next_use(provider_name):
+    """Return True when one more call would leave the provider exhausted."""
+    data = load_quota()
+    entry = data.get(provider_name, {})
+    exhausted_until = entry.get("exhausted_until")
+    if exhausted_until:
+        try:
+            if datetime.fromisoformat(exhausted_until) > datetime.now(timezone.utc):
+                return True
+        except (ValueError, TypeError):
+            pass
+    limit = entry.get("limit")
+    if not limit or limit <= 0:
+        return False
+    used = entry.get("used", 0)
+    return (limit - used) <= 1
 
 
 def get_quota_summary():

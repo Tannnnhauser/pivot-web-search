@@ -4,6 +4,9 @@ import asyncio
 import time
 from unittest.mock import patch
 
+import httpx
+
+from pivot_web_search_mcp import quota
 from pivot_web_search_mcp.providers import SearchResult
 from pivot_web_search_mcp.routing import (
     CB_CONSECUTIVE_THRESHOLD,
@@ -17,6 +20,7 @@ from pivot_web_search_mcp.routing import (
     CircuitBreaker,
     ScoredProvider,
     _CallCounter,
+    _AttemptResult,
     _effective_budget,
     FailureInfo,
     build_priority_groups,
@@ -422,8 +426,8 @@ class TestExecuteSearch:
         for _ in range(CB_CONSECUTIVE_THRESHOLD):
             b.record_failure("solo")
         result = await execute_search("test", 5, providers, b)
-        assert not isinstance(result, FailureInfo)
-        assert result.provider == "solo"
+        assert isinstance(result, FailureInfo)
+        assert result.failures == [{"provider": "all", "error": "all providers in cooldown"}]
 
     async def test_tcp_failure_aborts_after_two_groups(self):
         """Two consecutive TCP-level failures should short-circuit (no network)."""
@@ -489,6 +493,76 @@ class TestExecuteSearch:
         assert _call_counter.value("flaky") == 0
         assert _call_counter.value("ok") == 1
 
+    async def test_stops_starting_new_groups_once_total_budget_is_spent(self):
+        partial = SearchResult(
+            results=[
+                {"url": "https://partial-1.com", "title": "x", "snippet": "alpha"},
+                {"url": "https://partial-2.com", "title": "y", "snippet": "beta"},
+            ],
+            provider="g1",
+        )
+        providers = [
+            FakeProvider("g1", priority=10),
+            FakeProvider("g2", priority=20),
+            FakeProvider("g3", priority=30),
+        ]
+        b = CircuitBreaker()
+
+        group_results = iter([
+            _AttemptResult(provider_name="g1", result=partial),
+            _AttemptResult(provider_name="g2", error="timeout"),
+            _AttemptResult(provider_name="g3", result=make_result(3, "g3")),
+        ])
+
+        with patch("pivot_web_search_mcp.routing._effective_budget", return_value=1.0), \
+                patch("pivot_web_search_mcp.routing._execute_priority_group",
+                      side_effect=lambda *args, **kwargs: next(group_results)) as mock_exec, \
+                patch("pivot_web_search_mcp.routing.time.time", return_value=0.0), \
+                patch("pivot_web_search_mcp.routing.time.monotonic",
+                      side_effect=[0.0, 0.0, 0.6, 1.2]):
+            result = await execute_search("zzz", 5, providers, b)
+
+        assert not isinstance(result, FailureInfo)
+        assert result.provider == "g1"
+        assert mock_exec.call_count == 2
+
+    async def test_retry_after_marks_provider_quota_exhausted(self):
+        response = httpx.Response(
+            429,
+            headers={"Retry-After": "120"},
+            request=httpx.Request("GET", "https://example.com/search"),
+        )
+        providers = [
+            FakeProvider(
+                "brave",
+                priority=10,
+                search_error=httpx.HTTPStatusError("rate limited", request=response.request, response=response),
+            )
+        ]
+        b = CircuitBreaker()
+
+        result = await execute_search("test", 5, providers, b)
+
+        assert isinstance(result, FailureInfo)
+        assert result.failures == [{"provider": "brave", "error": "rate_limited"}]
+        assert quota.is_exhausted("brave") is True
+        exhausted_until = quota.load_quota()["brave"]["exhausted_until"]
+        assert exhausted_until is not None
+
+    async def test_hedge_skips_second_leg_that_would_exhaust_quota(self):
+        quota.set_provider_limit("hedge2", 1)
+        providers = [
+            FakeProvider("hedge1", priority=10, search_error=RuntimeError("boom")),
+            FakeProvider("hedge2", priority=10, search_result=make_result(3, "hedge2", answer="A" * 40)),
+            FakeProvider("fallback", priority=20, search_result=make_result(3, "fallback", answer="B" * 40)),
+        ]
+        b = CircuitBreaker()
+
+        result = await execute_search("python tutorial", 5, providers, b)
+
+        assert not isinstance(result, FailureInfo)
+        assert result.provider == "fallback"
+
 
 # ---------------------------------------------------------------------------
 # Pick Recovery Candidate Tests
@@ -503,7 +577,7 @@ class TestPickRecoveryCandidate:
 
         for _ in range(CB_CONSECUTIVE_THRESHOLD):
             b.record_failure("p1")
-        b._get_entry("p1").opened_at = time.time() - 50
+        b._get_entry("p1").opened_at = time.time() - (CB_COOLDOWN_SECONDS + 1)
 
         for _ in range(CB_CONSECUTIVE_THRESHOLD):
             b.record_failure("p2")
@@ -538,16 +612,26 @@ class TestPickRecoveryCandidate:
         result = pick_recovery_candidate([deep_only], b, affinity="general")
         assert result is None
 
-    def test_recovery_skips_closed_providers(self):
-        """A CLOSED provider must not be picked over a truly-OPEN one."""
+    def test_recovery_returns_closed_provider_when_available(self):
         b = CircuitBreaker()
-        closed = FakeProvider("closed")  # state stays CLOSED
+        closed = FakeProvider("closed")
         open_p = FakeProvider("open_p")
         for _ in range(CB_CONSECUTIVE_THRESHOLD):
             b.record_failure("open_p")
         result = pick_recovery_candidate([closed, open_p], b)
         assert result is not None
-        assert result.name == "open_p"
+        assert result.name == "closed"
+
+    def test_returns_none_when_all_open_are_still_cooling_down(self):
+        b = CircuitBreaker()
+        p1 = FakeProvider("p1")
+        p2 = FakeProvider("p2")
+        for provider in (p1, p2):
+            for _ in range(CB_CONSECUTIVE_THRESHOLD):
+                b.record_failure(provider.name)
+
+        result = pick_recovery_candidate([p1, p2], b)
+        assert result is None
 
 
 # ---------------------------------------------------------------------------

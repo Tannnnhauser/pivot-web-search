@@ -31,7 +31,7 @@ def quality_gate(
 
     Gate 0: AI answer with 40+ non-whitespace chars → ACCEPT
     Gate 1: At least 2 unique URLs required
-    Gate 2: At least 1 query term in any result title/snippet → ACCEPT
+    Gate 2: At least 1 query term in any result snippet → ACCEPT
     """
     # Gate 0: AI answer presence
     if answer and len(answer.strip()) >= 40:
@@ -53,7 +53,7 @@ def quality_gate(
 
     term_set = set(terms)
     for r in results:
-        text = f"{r.get('title', '')} {r.get('snippet', '')}".lower()
+        text = str(r.get("snippet", "")).lower()
         tokens = set(re.findall(r"\w+", text))
         if term_set & tokens:
             return Verdict.ACCEPT

@@ -1,7 +1,7 @@
 
 import pytest
 
-from pivot_web_search_mcp import config, extraction, http_client, providers, quota, routing, search, server
+from pivot_web_search_mcp import config, extraction, http_client, providers, quota, routing, server
 
 
 @pytest.fixture(autouse=True)
@@ -24,15 +24,15 @@ def _isolate_quota(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _reset_search_caches():
-    """Clear search.py global caches between tests."""
-    search._proxy_cache.clear()
-    search._proxy_cache_ts.clear()
-    search._fetch_cache.clear()
+    """Clear HTTP and extraction caches between tests."""
+    http_client._proxy_cache.clear()
+    http_client._proxy_cache_ts.clear()
+    extraction._fetch_cache.clear()
     extraction._fetch_cache_bytes = 0
     yield
-    search._proxy_cache.clear()
-    search._proxy_cache_ts.clear()
-    search._fetch_cache.clear()
+    http_client._proxy_cache.clear()
+    http_client._proxy_cache_ts.clear()
+    extraction._fetch_cache.clear()
     extraction._fetch_cache_bytes = 0
 
 

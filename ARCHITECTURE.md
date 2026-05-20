@@ -235,7 +235,13 @@ pivot-web-search/
 │   ├── __init__.py
 │   ├── __main__.py          # Entry: mcp.run(transport="stdio")
 │   ├── server.py            # FastMCP server, 3 tools, smart defaults
-│   ├── search.py            # Core: search, proxy failover, extraction, dedup_and_rank
+│   ├── backends.py          # HTTP adapters: DDG/Tavily/Brave/Gemini
+│   ├── extraction.py        # trafilatura wrapper
+│   ├── http_client.py       # Shared httpx client + proxy failover
+│   ├── results.py           # dedup_and_rank, markdown rendering
+│   ├── validation.py        # URL/SSRF validation
+│   ├── config.py            # YAML config loaders (hot-reload)
+│   ├── defaults.py          # Smart-defaults priority table
 │   ├── providers.py         # ProviderRegistry, adapters, config loaders
 │   ├── llm_search_formats.py # Strategy pattern for LLM search API formats
 │   ├── routing.py           # Priority-group routing, hedging, circuit breaker
@@ -243,7 +249,7 @@ pivot-web-search/
 │   ├── fetch.py             # SPA detection, JS renderer dispatch
 │   ├── logging.py           # Centralized logging (stderr + optional file)
 │   └── quota.py             # Per-provider quota tracking, filelock (cross-platform)
-├── tests/                   # 306 tests (pytest-asyncio), 15 modules
+├── tests/                   # 305 tests (pytest-asyncio), 15 modules
 ├── skills/pivot-web-search/       # Skill definition for Claude Code
 └── docs/                    # Design documents (not tracked in git)
 ```
@@ -255,7 +261,7 @@ pivot-web-search/
 3. **Config-driven** — providers, proxies, and fetch behavior all via YAML, hot-reloadable
 4. **Quota-aware** — binary exclusion (exhausted = skip), no implicit throttling
 5. **Per-provider timeouts** — no global budget, each provider gets its configured deadline
-6. **Smart defaults** — quality-first ordering (LLM Search > Tavily/Brave > SearXNG > Gemini > DDG) when no explicit priority
+6. **Smart defaults** — quality-first ordering (LLM Search > Tavily/Brave/Gemini > SearXNG/json_api > DDG) when no explicit priority
 7. **3-tier quality gate** — AI answer presence, URL count, keyword overlap drives failover
 8. **Fixed 60s circuit breaker** — 3 consecutive failures opens, no exponential backoff
 9. **Provider affinity** — deep research providers excluded from normal routing unless explicitly requested

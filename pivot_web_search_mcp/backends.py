@@ -5,6 +5,8 @@ import json
 import time
 import urllib.parse
 
+import httpx
+
 from .http_client import (
     _get_proxies,
     _open_with_fallback,
@@ -128,6 +130,11 @@ async def search_tavily(query, max_results=5, include_answer=False, search_depth
                      "snippet": r.get("content", "")}
                     for r in (obj.get("results") or [])[:max_results]]
         return results, obj.get("answer")
+    except httpx.HTTPStatusError as e:
+        log(f"Tavily failed: {e}")
+        if e.response is not None and e.response.status_code == 429:
+            raise
+        return None
     except Exception as e:
         log(f"Tavily failed: {e}")
         return None
@@ -157,6 +164,11 @@ async def search_brave(query, max_results=5):
                      "snippet": r.get("description", "")}
                     for r in (obj.get("web", {}).get("results") or [])[:max_results]]
         return (results, resp_headers) if results else None
+    except httpx.HTTPStatusError as e:
+        log(f"Brave failed: {e}")
+        if e.response is not None and e.response.status_code == 429:
+            raise
+        return None
     except Exception as e:
         log(f"Brave failed: {e}")
         return None

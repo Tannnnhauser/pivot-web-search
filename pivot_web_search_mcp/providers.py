@@ -15,6 +15,8 @@ import re
 import urllib.parse
 from dataclasses import dataclass, field
 
+import httpx
+
 from . import quota
 from .backends import search_brave, search_ddg, search_tavily
 from .config import (  # noqa: F401 — re-exported for tests/back-compat
@@ -229,6 +231,11 @@ class LlmSearchProvider(SearchProvider):
             resp = await _open_with_fallback(
                 "POST", endpoint, headers=headers, data=body, timeout=timeout)
 
+            if resp.status_code == 429 and resp.headers.get("Retry-After"):
+                quota.mark_rate_limited(self.name, resp.headers.get("Retry-After"))
+                log(f"{self.name} HTTP 429: rate limited")
+                return None
+
             if resp.status_code >= 400:
                 try:
                     err_obj = resp.json()
@@ -239,6 +246,10 @@ class LlmSearchProvider(SearchProvider):
                 return None
 
             obj = resp.json()
+        except httpx.HTTPStatusError as e:
+            if e.response is not None and e.response.status_code == 429:
+                log(f"{self.name} HTTP 429: {e}")
+                raise
         except Exception as e:
             log(f"{self.name} failed: {e}")
             return None
@@ -618,4 +629,3 @@ class ProviderRegistry:
         if self._config_path and self._config_path.exists():
             return {"source": "yaml", "path": str(self._config_path)}
         return {"source": "default"}
-
