@@ -36,9 +36,9 @@ class ProviderRegistry:
             return None, None
 
         entries = []
-        for i, name in enumerate(names):
+        for name in names:
             ptype = name
-            entry = {"name": name, "type": ptype, "enabled": True, "priority": (i + 1) * 10}
+            entry = {"name": name, "type": ptype, "enabled": True}
             default = next((d for d in DEFAULT_PROVIDERS if d["name"] == name), None)
             if default:
                 for k in ("api_key_env", "api_key_env_fallback", "api_format"):

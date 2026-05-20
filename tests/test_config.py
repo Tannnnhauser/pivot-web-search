@@ -9,16 +9,20 @@ class TestProviderRegistryFromEnv:
         monkeypatch.setenv("PIVOT_WEB_SEARCH_PROVIDERS", "ddg,tavily,brave")
         reg = providers.ProviderRegistry()
         reg.load()
-        names = [p.name for p in reg.get_ordered()]
-        assert names == ["ddg", "tavily", "brave"]
+        names = {p.name for p in reg.get_ordered()}
+        assert names == {"ddg", "tavily", "brave"}
 
-    def test_priority_by_position(self, monkeypatch):
-        monkeypatch.setenv("PIVOT_WEB_SEARCH_PROVIDERS", "brave,ddg")
+    def test_smart_defaults_applied_from_env(self, monkeypatch):
+        monkeypatch.setenv("PIVOT_WEB_SEARCH_PROVIDERS", "ddg,tavily,brave,gemini")
         reg = providers.ProviderRegistry()
         reg.load()
+        by_name = {p.name: p.effective_priority for p in reg.get_all()}
+        assert by_name["tavily"] == 20
+        assert by_name["brave"] == 20
+        assert by_name["gemini"] == 20
+        assert by_name["ddg"] == 90
         ordered = reg.get_ordered()
-        assert ordered[0].name == "brave"
-        assert ordered[0].priority < ordered[1].priority
+        assert ordered[-1].name == "ddg"
 
     def test_empty_string_ignored(self, monkeypatch):
         monkeypatch.setenv("PIVOT_WEB_SEARCH_PROVIDERS", "")

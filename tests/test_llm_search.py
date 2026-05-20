@@ -523,6 +523,15 @@ class TestGeminiProviderRefactored:
             assert result is None
 
     @pytest.mark.asyncio
+    async def test_health_check_no_explicit_endpoint(self):
+        """Gemini derives its endpoint from model name — health_check must use the
+        format's resolve_endpoint, not config['endpoint']."""
+        p = _make_gemini()
+        with patch.dict("os.environ", {"GEMINI_SEARCH_API_KEY": "k"}, clear=False):
+            ok, msg = await p.health_check()
+            assert ok, f"expected healthy, got msg={msg!r}"
+
+    @pytest.mark.asyncio
     async def test_search_success(self):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
