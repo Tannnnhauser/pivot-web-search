@@ -87,9 +87,10 @@ sequenceDiagram
     participant LLM as Claude (LLM)
     participant S as server.py
     participant RT as routing.py
+    participant QG as quality_gate.py
     participant Q as Quota Manager
     participant R as ProviderRegistry
-    participant P as Provider (DDG/Tavily/Brave/Gemini)
+    participant P as Provider (Tavily/Brave/DDG/Gemini/...)
 
     LLM->>S: WebSearch(query, ...)
     S->>S: _apply_smart_defaults(query)
@@ -98,29 +99,32 @@ sequenceDiagram
         S->>S: search_brave_llm_context(query)
         S-->>LLM: formatted content results
     else super_mode=true
-        S->>R: get all enabled providers
-        S->>Q: filter exhausted providers
-        S->>P: parallel search (asyncio.gather)
+        S->>RT: select_providers(affinity filter)
+        RT->>Q: skip exhausted providers
+        RT->>RT: skip circuit-broken providers
+        S->>P: parallel search (per-provider timeouts)
         P-->>S: results from each provider
-        S->>S: deduplicate & rank (dedup_and_rank)
+        S->>S: deduplicate & rank (provider-agreement count)
         S-->>LLM: merged markdown results
     else normal mode
-        S->>R: get_ordered() providers
-        S->>RT: route_providers(providers, breaker)
-        RT->>Q: get usage_pct per provider
-        RT->>RT: tuple-sort (tier_rank, metric, priority)
-        RT->>RT: circuit breaker — skip unhealthy
-        RT-->>S: ordered provider list
-        loop each provider (tuple-sorted)
-            S->>P: search(query, max_results)
-            P-->>S: SearchResult
-            alt results >= min_acceptable
-                S->>Q: record_usage(provider)
-                S-->>LLM: formatted markdown
-            else too few results
-                S->>S: try next provider
+        S->>RT: execute_search(query, providers, breaker)
+        RT->>RT: select_providers (affinity + quota + breaker gates)
+        RT->>RT: build_priority_groups (group by effective_priority)
+        loop each priority group (high → low)
+            alt single provider in group
+                RT->>P: search(query) with timeout
+            else multiple same-priority (hedged)
+                RT->>P: staggered starts (200ms delay)
+                P-->>RT: first response
+            end
+            RT->>QG: quality_gate(query, results, answer)
+            alt verdict = ACCEPT
+                RT-->>S: return result
+            else verdict = PARTIAL
+                RT->>RT: keep best, try next group
             end
         end
+        S-->>LLM: formatted markdown
     end
 ```
 
@@ -153,25 +157,43 @@ sequenceDiagram
     S-->>LLM: formatted content + prompt
 ```
 
-## Provider Failover Strategy
+## Provider Routing Strategy
 
 ```mermaid
-graph LR
-    subgraph "Priority Order (configurable via YAML)"
-        P1[Provider 1<br/>priority: 10<br/>e.g. DDG — free] --> P2[Provider 2<br/>priority: 20<br/>e.g. Tavily]
-        P2 --> P3[Provider 3<br/>priority: 30<br/>e.g. Brave]
-        P3 --> PN[Provider N<br/>priority: 40<br/>e.g. Gemini]
+graph TB
+    subgraph "Priority-Group Routing"
+        direction TB
+        SG[Smart Defaults<br/>LLM=10, Tavily/Brave/Gemini=20<br/>SearXNG/json_api=30, DDG=90]
+        AG[Affinity Gate<br/>deep providers excluded<br/>unless explicitly requested]
+        QG[Quota Gate<br/>skip exhausted]
+        BG[Breaker Gate<br/>skip circuit-open]
+        PG[Priority Grouping<br/>same priority = hedged group]
     end
 
-    subgraph "Quota-Aware Reordering"
-        Q{usage_pct<br/>comparison}
-        Q -->|lowest usage first| Reordered[Reordered list<br/>skip exhausted]
+    subgraph "Hedged Execution (same priority)"
+        H1[Provider A fires at t=0]
+        H2[Provider B fires at t=200ms]
+        H3[First quality-gate ACCEPT wins]
     end
 
-    P1 --> Q
-    P2 --> Q
-    P3 --> Q
-    PN --> Q
+    subgraph "Quality Gate (3-tier)"
+        G0[Gate 0: AI answer ≥ 40 chars?]
+        G1[Gate 1: Unique URLs ≥ 2?]
+        G2[Gate 2: Query term overlap?]
+    end
+
+    SG --> AG --> QG --> BG --> PG
+    PG --> H1
+    PG --> H2
+    H1 --> H3
+    H2 --> H3
+    H3 --> G0
+    G0 -->|yes| ACCEPT[Return result]
+    G0 -->|no| G1
+    G1 -->|yes| G2
+    G1 -->|no| PARTIAL[Keep best, try next group]
+    G2 -->|yes| ACCEPT
+    G2 -->|no| PARTIAL
 ```
 
 > Built-in adapters: DDG, Tavily, Brave, Gemini, SearXNG, a generic `json_api` adapter for any REST search API, and `llm_search` for any LLM with built-in web search grounding (Perplexity Sonar Pro, OpenAI web_search, SAP AI Core, etc.). New adapters are one class. `searxng`, `json_api`, and `llm_search` types can be instantiated multiple times with different names — each instance gets independent priority, quota tracking, and circuit breaker state. The `llm_search` adapter uses a Strategy pattern (`LlmSearchFormat`) with pluggable format handlers (`chat_completions`, `responses`, `gemini`).
@@ -199,8 +221,9 @@ pivot-web-search/
 │   ├── plugin.json          # Tool declarations, userConfig schema
 │   └── marketplace.json     # Marketplace listing
 ├── .mcp.json                # MCP server launch config (stdio)
+├── ARCHITECTURE.md          # This file
 ├── config/
-│   ├── providers.yaml       # Search providers (type, priority, key)
+│   ├── providers.yaml       # Search providers (type, priority, timeout, affinity)
 │   ├── proxies.yaml         # Proxy endpoints (failover order)
 │   └── fetch.yaml           # WebFetch config (JS renderer, limits)
 ├── hooks/
@@ -212,26 +235,40 @@ pivot-web-search/
 │   ├── __init__.py
 │   ├── __main__.py          # Entry: mcp.run(transport="stdio")
 │   ├── server.py            # FastMCP server, 3 tools, smart defaults
-│   ├── search.py            # Core: search, proxy fallover, extraction, dedup_and_rank
-│   ├── providers.py         # ProviderRegistry, adapters, config loaders
+│   ├── backends.py          # HTTP adapters: DDG/Tavily/Brave/Gemini
+│   ├── extraction.py        # trafilatura wrapper
+│   ├── http_client.py       # Shared httpx client + proxy failover
+│   ├── results.py           # dedup_and_rank, markdown rendering
+│   ├── validation.py        # URL/SSRF validation
+│   ├── config.py            # YAML config loaders (hot-reload)
+│   ├── defaults.py          # Smart-defaults priority table
+│   ├── providers/           # Provider subpackage
+│   │   ├── __init__.py      # Public re-exports
+│   │   ├── base.py          # SearchProvider, SearchResult
+│   │   ├── adapters.py      # 6 adapters (Ddg/Tavily/Brave/LlmSearch/Searxng/JsonApi) + ADAPTER_MAP
+│   │   └── registry.py      # ProviderRegistry with mtime reload
 │   ├── llm_search_formats.py # Strategy pattern for LLM search API formats
-│   ├── routing.py           # Tuple-sort routing, circuit breaker, pacing pressure
+│   ├── routing.py           # Priority-group routing, hedging, circuit breaker
+│   ├── quality_gate.py      # 3-tier quality gate (answer/URLs/keywords)
 │   ├── fetch.py             # SPA detection, JS renderer dispatch
 │   ├── logging.py           # Centralized logging (stderr + optional file)
 │   └── quota.py             # Per-provider quota tracking, filelock (cross-platform)
-├── tests/                   # 239 tests (pytest-asyncio), 14 modules
+├── tests/                   # 312 tests (305 offline + 7 integration), 15 modules
 ├── skills/pivot-web-search/       # Skill definition for Claude Code
-└── docs/                    # Architecture documentation
+└── docs/                    # Design documents (not tracked in git)
 ```
 
 ## Key Design Principles
 
 1. **Zero mandatory external deps for search** — DDG works with no API key
-2. **Graceful degradation** — if a provider fails or is exhausted, next one takes over
+2. **Priority-group routing** — same-priority providers hedged, first quality-gate pass wins
 3. **Config-driven** — providers, proxies, and fetch behavior all via YAML, hot-reloadable
-4. **Quota-aware** — tracks API usage, prefers cheapest available provider
-5. **Optional heavy deps** — Playwright only installed via the `browser` extra (`uv sync --extra browser`)
-6. **Proxy failover** — every HTTP call goes through the proxy chain (direct by default, configurable)
-7. **Security by default** — SSRF protection, pre-redirect blocking, credential redaction
-8. **Cross-platform** — filelock instead of fcntl, works on Windows/macOS/Linux
-9. **Async-safe** — shared mutable state protected by `asyncio.Lock`; config loaders use `threading.Lock`
+4. **Quota-aware** — binary exclusion (exhausted = skip), no implicit throttling
+5. **Per-provider timeouts** — no global budget, each provider gets its configured deadline
+6. **Smart defaults** — quality-first ordering (LLM Search > Tavily/Brave/Gemini > SearXNG/json_api > DDG) when no explicit priority
+7. **3-tier quality gate** — AI answer presence, URL count, keyword overlap drives failover
+8. **Fixed 60s circuit breaker** — 3 consecutive failures opens, no exponential backoff
+9. **Provider affinity** — deep research providers excluded from normal routing unless explicitly requested
+10. **Security by default** — SSRF protection, pre-redirect blocking, credential redaction
+11. **Cross-platform** — filelock instead of fcntl, works on Windows/macOS/Linux
+12. **Async-safe** — single-threaded asyncio, no thread locks; config loaders use mtime caching (`cache_still_valid`)

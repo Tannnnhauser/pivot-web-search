@@ -4,7 +4,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
-[![Tests: 239](https://img.shields.io/badge/tests-239%20passing-brightgreen.svg)]()
+[![Tests: 305](https://img.shields.io/badge/tests-305%20passing-brightgreen.svg)]()
 
 ## What Is This?
 
@@ -12,10 +12,11 @@ Claude Code users on **Amazon Bedrock** (or other API providers) don't get Anthr
 
 ## Key Features
 
-- **Multi-provider failover** — chains DuckDuckGo → Tavily → Brave → Gemini with automatic fallback. If one fails, the next takes over transparently.
-- **Tuple-sort routing** — providers scored as `(tier_rank, metric, priority)` tuples. Free providers first, then daily-quota (Gemini), then paid with pacing pressure. No manual priority tuning needed.
-- **Circuit breaker** — per-provider health tracking with sliding window. After 3 consecutive failures (or >60% failure rate), a provider is temporarily bypassed with automatic recovery probing.
-- **Super mode** — queries all providers in parallel via native `asyncio.gather`, deduplicates by URL, and ranks by cross-provider agreement.
+- **Priority-group routing** — providers grouped by priority and executed with hedged requests. Same-priority providers fire concurrently with 200ms stagger; first quality-gate pass wins. Groups tried sequentially from highest to lowest priority.
+- **Smart defaults** — quality-first ordering (LLM Search > Tavily/Brave/Gemini > SearXNG/json_api > DDG) applied automatically. No manual priority tuning needed for common setups.
+- **3-tier quality gate** — AI answer presence, URL count, and keyword overlap drive automatic failover decisions. Partial results are kept as fallback while better sources are tried.
+- **Circuit breaker** — per-provider health tracking. After 3 consecutive failures, a provider is temporarily bypassed (60s cooldown) with automatic recovery probing.
+- **Super mode** — queries all providers in parallel, deduplicates by URL, and ranks by cross-provider agreement.
 - **Fully async I/O** — all network calls use `httpx.AsyncClient` with connection pooling. No thread pools for HTTP — enables efficient concurrent requests and prepares for streamable-HTTP remote transport.
 - **Local content extraction** — fetches and extracts full page content via trafilatura. No external API needed. Includes Next.js/Nuxt.js SPA fallback.
 - **Quota-aware scheduling** — tracks API usage per provider, prefers cheapest available, skips exhausted providers.
@@ -29,7 +30,7 @@ Claude Code users on **Amazon Bedrock** (or other API providers) don't get Anthr
 
 Most MCP search tools bind to a single provider. If the API is down, rate-limited, or blocked in your network, you get nothing. Single-provider tools also can't compare results across sources or handle quota exhaustion gracefully.
 
-This plugin solves these problems by combining multiple search backends with quality detection — if a provider returns fewer than 2 results, failover continues automatically. In super mode, all providers are queried in parallel for maximum coverage.
+This plugin solves these problems by combining multiple search backends with a quality gate — if results don't pass (too few URLs, no keyword overlap), failover continues automatically to the next priority group. In super mode, all providers are queried in parallel for maximum coverage.
 
 ## Prerequisites
 
@@ -58,13 +59,21 @@ The plugin prompts for configuration at install time:
 | Setting | Description |
 |---|---|
 | **Search providers** | Comma-separated list in failover order (default: `ddg,tavily,brave,gemini`) |
-| **Tavily API Key** | Stored in system keychain. Leave empty to skip. |
-| **Brave Search API Key** | Stored in system keychain. Leave empty to skip. |
-| **Gemini API Key** | Stored in system keychain. Leave empty to skip. |
+| **Tavily API Key** | Stored in system keychain. Leave empty to inherit `TAVILY_API_KEY` from the shell. |
+| **Brave Search API Key** | Stored in system keychain. Leave empty to inherit `BRAVE_API_KEY` from the shell. |
+| **Gemini API Key** | Stored in system keychain. Leave empty to inherit `GEMINI_SEARCH_API_KEY` (or `GOOGLE_STUDIO_API_KEY`) from the shell. |
 | **Proxy URLs** | Comma-separated, priority order. `direct` = no proxy (default: `direct`) |
 | **Gemini daily quota** | Optional. Limits Gemini grounded searches per day (resets at PT midnight). Check your limit at [AI Studio](https://aistudio.google.com/rate-limit). |
 
 DDG needs no API key. Providers without a key are automatically skipped during failover.
+
+**Key resolution order** — for each provider key, the plugin reads:
+1. The standard env var (e.g. `TAVILY_API_KEY`) inherited from the parent shell. **Wins if set.**
+2. The `/plugin` UI value (injected as `PIVOT_USERCONFIG_TAVILY_API_KEY`).
+
+This means a value exported in your shell always takes precedence over the UI config. To use the UI value instead, `unset TAVILY_API_KEY` in your shell.
+
+> **macOS GUI launch caveat:** When Claude Code is started from Spotlight or the Dock, it does **not** see your `~/.zshrc` exports. Either start it from a terminal, set keys via the `/plugin` UI, or add them to the `env` block in `~/.claude/config.json`.
 
 You can reconfigure anytime via `claude plugin configure pivot-web-search`.
 
@@ -127,7 +136,7 @@ When called via MCP, tools are prefixed: `mcp__pivot-web-search__WebSearch`, `mc
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `query` | str | *required* | Search query |
-| `provider` | str | `"auto"` | Force provider: `auto` / `ddg` / `tavily` / `brave` / `gemini` |
+| `provider` | str | `"auto"` | Force provider: `auto` / `ddg` / `tavily` / `brave` / `gemini` / `searxng`, or any registered provider name (e.g. custom `json_api` or `llm_search` instances) |
 | `super_mode` | bool | `false` | Query all providers in parallel for maximum coverage |
 | `max_results` | int | `5` | Number of results: 1–10 (1–20 in super mode) |
 | `allowed_domains` | list[str] | `null` | Only include results from these domains |
@@ -136,6 +145,7 @@ When called via MCP, tools are prefixed: `mcp__pivot-web-search__WebSearch`, `mc
 | `timelimit` | str | `null` | Time filter: `d` = day, `w` = week, `m` = month, `y` = year |
 | `include_answer` | bool | `false` | AI-generated answer summary (Tavily only) |
 | `include_content` | bool | `false` | Return pre-extracted page content with results (Brave LLM Context) |
+| `max_content_tokens` | int | `8192` | Token budget for content extraction when `include_content=true` (1024–32768) |
 | `search_depth` | str | `"basic"` | `basic` or `advanced` — advanced gives more detail but costs 2x credits (Tavily only) |
 | `topic` | str | `"general"` | `general` or `news` (Tavily only) |
 | `days` | int | `null` | Limit news to recent N days (Tavily only) |
@@ -175,78 +185,67 @@ Install-time settings (via `userConfig`) are injected as environment variables a
 
 ### `config/providers.yaml`
 
+Providers are tried by priority (lower number = tried first). Same-priority providers are hedged — queried concurrently with staggered starts, first quality result wins. If no priority is set, smart defaults apply based on provider type.
+
 ```yaml
 providers:
-  - name: ddg
-    type: ddg
-    tier: free
-    enabled: true
-    priority: 10          # lower = tried first
-
   - name: tavily
     type: tavily
-    tier: paid
-    enabled: true
-    priority: 20
     api_key_env: TAVILY_API_KEY
+    # priority: 20 (smart default — hedged with brave)
+    # timeout: 4 (smart default)
 
   - name: brave
     type: brave
-    tier: paid
-    enabled: true
-    priority: 30
     api_key_env: BRAVE_API_KEY
+    # priority: 20 (smart default — hedged with tavily)
+    # timeout: 4 (smart default)
 
   - name: gemini
     type: gemini
-    tier: daily
-    enabled: true
-    priority: 40
     api_key_env: GEMINI_SEARCH_API_KEY
+    model: gemini-2.5-flash
+    # priority: 20 (smart default — hedged with tavily/brave)
+    # timeout: 20 (smart default)
 
-  - name: searxng
-    type: searxng
-    enabled: false
-    priority: 50
-    endpoint: "http://localhost:8080/search"
+  - name: ddg
+    type: ddg
+    # priority: 90 (smart default — exhaustion fallback)
+    # timeout: 6 (smart default)
 
-  # You can define multiple json_api instances — each with a unique name,
-  # independent priority, quota tracking, and circuit breaker.
+  # Self-hosted SearXNG
+  # - name: searxng-local
+  #   type: searxng
+  #   endpoint: "http://localhost:8888/search"
 
-  - name: custom-api
-    type: json_api
-    enabled: false
-    priority: 60
-    endpoint: "https://api.example.com/search"
-    api_key_env: CUSTOM_API_KEY
-    method: GET
-    request_params:
-      q: "{{query}}"
-      num: "{{max_results}}"
-    response_mapping:
-      results_path: "data.results"
-      title: "title"
-      url: "link"
-      snippet: "description"
-
-  - name: serper
-    type: json_api
-    enabled: false
-    priority: 65
-    endpoint: "https://google.serper.dev/search"
-    api_key_env: SERPER_API_KEY
-    method: POST
-    request_body:
-      q: "{{query}}"
-      num: "{{max_results}}"
-    response_mapping:
-      results_path: "organic"
-      title: "title"
-      url: "link"
-      snippet: "snippet"
-
-  # SearXNG, json_api, etc. — see config/providers.yaml for full examples
+  # Generic JSON API (Serper, Google CSE, etc.)
+  # Multiple json_api instances allowed — each gets independent
+  # priority, quota tracking, and circuit breaker state.
+  # - name: serper
+  #   type: json_api
+  #   endpoint: "https://google.serper.dev/search"
+  #   api_key_env: SERPER_API_KEY
+  #   method: POST
+  #   request_body:
+  #     q: "{{query}}"
+  #     num: "{{max_results}}"
+  #   response_mapping:
+  #     results_path: "organic"
+  #     title: "title"
+  #     url: "link"
+  #     snippet: "snippet"
 ```
+
+**Smart default priorities** (when no explicit `priority` is set):
+
+| Type | Priority | Timeout |
+|---|---|---|
+| `llm_search` | 10 | 15s |
+| `tavily` / `brave` / `gemini` | 20 | 4s / 4s / 20s |
+| `searxng` / `json_api` | 30 | 6s |
+| `ddg` | 90 | 6s |
+
+> **Note:** Enabling an `llm_search` provider trades latency for quality — at priority 10 it runs ahead of Tavily/Brave with a 15s timeout, so every query may take 15+s. Bump its `priority` above 20 (or omit it from the config) if latency matters more than answer quality.
 
 ### LLM Search Providers (`type: llm_search`)
 
@@ -261,17 +260,12 @@ Two `api_format` paradigms are supported:
 ```yaml
   - name: sonar-pro
     type: llm_search
-    tier: daily
-    priority: 15
     api_format: chat_completions
-    endpoint: "https://api.ai.example.com/v2/chat/completions"
+    endpoint: "https://api.perplexity.ai/chat/completions"
     model: sonar-pro
-    max_tokens: 500
-    timeout: 45
-    system_prompt: "You are a search assistant. Provide a concise answer with source citations."
-    headers:
-      AI-Resource-Group: default
-    api_key_env: AI_CORE_TOKEN
+    api_key_env: PERPLEXITY_API_KEY
+    timeout: 15
+    # priority: 10 (smart default)
 ```
 
 Response parsing uses a data-driven fallback chain:
@@ -284,16 +278,13 @@ Response parsing uses a data-driven fallback chain:
 ```yaml
   - name: gpt-web-search
     type: llm_search
-    tier: paid
-    priority: 25
     api_format: responses
     endpoint: "https://api.openai.com/v1/responses"
     model: gpt-4o
-    max_tokens: 4000
-    timeout: 60
-    search_tool: web_search          # or web_search_preview
-    search_context_size: medium      # low, medium, high
     api_key_env: OPENAI_API_KEY
+    timeout: 45
+    search_tool: web_search
+    search_context_size: medium
 ```
 
 Additional `responses` format options: `filters` (domain filtering object), `user_location` (location context).
@@ -345,17 +336,20 @@ Set `js_renderer: playwright` for JavaScript-heavy sites (requires `uv sync --ex
 ```
 Request
   │
-  ├─ failover mode: tuple-sort routing (tier_rank, metric, priority)
-  │   free (DDG/SearXNG, metric=0) → daily (Gemini, metric=usage%) → paid (Tavily/Brave, metric=pacing pressure)
-  │   Circuit breaker: unhealthy providers bypassed, auto-recovery after 120s cooldown
-  │   Quality check: continues if results < 2, keeps best fallback
-  │   High-water: Gemini demoted to paid tier at >85% daily usage (unless <4h to midnight)
-  │   News queries: DDG deprioritized below paid providers
+  ├─ normal mode: priority-group routing
+  │   ┌─ Group 1 (priority 10): LLM Search (Perplexity, OpenAI, etc.)
+  │   ├─ Group 2 (priority 20): Tavily + Brave + Gemini ← hedged (200ms stagger, first quality-gate pass wins)
+  │   ├─ Group 3 (priority 30): SearXNG / json_api
+  │   └─ Group 4 (priority 90): DDG (free exhaustion fallback)
   │
-  └─ super mode:    DDG ──┐
-                    Tavily ┤ parallel (skip exhausted, ignore breaker) → dedup → rank by provider count
-                    Brave ─┤
-                    Gemini ┘
+  │   Gates: quota-exhausted → skip | circuit-open → skip | affinity mismatch → skip
+  │   Quality gate (3-tier): AI answer ≥40 chars? → unique URLs ≥2? → keyword overlap?
+  │   Circuit breaker: 3 consecutive failures → OPEN (60s cooldown) → HALF_OPEN → probe
+  │
+  └─ super mode:    Tavily ┐
+                    Brave  ┤ parallel (skip exhausted) → dedup → rank by provider count
+                    Gemini ┤
+                    DDG    ┘
 ```
 
 Each provider independently tries all configured proxies (direct → myproxy1 → myproxy2) with per-host caching. The proxy cache persists to `~/.cache/pivot-web-search-proxy-cache.json` across sessions.
@@ -371,7 +365,7 @@ API usage is tracked across sessions in `~/.cache/pivot-web-search/quota.json`:
 | **Brave** | Response headers | Rolling 30-day window | Parses `X-RateLimit-Remaining` / `X-RateLimit-Reset` headers |
 | **Gemini** | Local counting (daily) | Varies by account (resets at PT midnight) | Set limit via `PIVOT_WEB_SEARCH_GEMINI_QUOTA` env var |
 
-Quota-aware scheduling prefers providers with lower usage. Providers at 100% are skipped entirely. Paid providers are ranked by pacing pressure (usage_pct / elapsed_time_pct) so that over-budget providers are naturally deprioritized. Resets automatically on calendar month rollover.
+Quota-aware scheduling skips providers at 100% usage. Providers are ordered by priority groups (smart defaults or explicit config). Resets automatically on calendar month rollover.
 
 ## Architecture
 
@@ -381,9 +375,16 @@ hooks/hooks.json        PreToolUse hook — blocks built-in WebSearch/WebFetch (
 
 pivot_web_search_mcp/         FastMCP server (stdio) — fully async, exposes 3 MCP tools
   server.py             Async tool handlers, failover orchestration, smart defaults
-  routing.py            Tuple-sort routing, circuit breaker, pacing pressure
-  search.py             Async search backends (httpx), URL extraction, proxy failover, dedup_and_rank
-  providers.py          Async provider adapters, registry, config source tracking
+  routing.py            Priority-group routing, hedged execution, circuit breaker, quality gate
+  quality_gate.py       3-tier quality gate (answer/URLs/keywords)
+  backends.py           Async search backends (DDG/Tavily/Brave/Gemini, httpx)
+  extraction.py         trafilatura wrapper for URL content extraction
+  http_client.py        Shared httpx client + proxy failover
+  results.py            dedup_and_rank, markdown rendering
+  validation.py         URL/SSRF validation
+  config.py             YAML config loaders (hot-reload)
+  defaults.py           Smart-defaults priority table
+  providers/            Subpackage: base (SearchProvider/SearchResult), adapters (6 built-ins + ADAPTER_MAP), registry (mtime hot-reload)
   llm_search_formats.py Strategy pattern for LLM search API formats (chat_completions, responses, gemini)
   fetch.py              SPA detection, async JS renderer dispatch (Playwright/Tavily)
   quota.py              Cross-session quota tracking (filelock, cross-platform)
@@ -393,15 +394,15 @@ config/                 YAML config for providers, proxies, and fetch (hot-reloa
 scripts/
   health-check.py       Startup probe — reports provider availability and quota
   pretool-check.py      PreToolUse hook script — fail-open tool blocker
-tests/                  239 tests across 14 modules (pytest-asyncio)
+tests/                  312 tests across 15 modules (305 offline + 7 live integration, pytest-asyncio)
 ```
 
 ## Testing
 
 ```sh
 uv sync --extra dev                   # install dev dependencies
-pytest -m "not integration"           # 239 offline tests (~5s)
-pytest                                # all tests including live API integration (requires API keys)
+pytest -m "not integration"           # 305 offline tests (~5s)
+pytest                                # 312 total (7 live integration, requires BRAVE/TAVILY keys)
 ```
 
 ## Troubleshooting
@@ -421,7 +422,7 @@ The SessionStart health check runs asynchronously and never blocks your session.
 or set Proxy URLs to `direct` via `claude plugin configure pivot-web-search`.
 
 **DuckDuckGo rate limiting (403 errors)**
-DDG occasionally rate-limits aggressive queries. The circuit breaker automatically detects consecutive failures and temporarily bypasses DDG (120s cooldown with probe-based recovery). DDG is restored once a probe request succeeds. For reliability, configure at least one API-backed provider.
+DDG occasionally rate-limits aggressive queries. The circuit breaker automatically detects consecutive failures and temporarily bypasses DDG (60s cooldown with probe-based recovery). DDG is restored once a probe request succeeds. For reliability, configure at least one API-backed provider.
 
 **`trafilatura` extraction returns empty**
 Some JavaScript-heavy sites need a renderer. Set `js_renderer: playwright`

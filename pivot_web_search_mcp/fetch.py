@@ -10,9 +10,10 @@ Backends:
 """
 
 import asyncio
-import os
 import re
+from typing import Literal
 
+from .extraction import extract_tavily
 from .logging import log
 
 _SPA_SHELL_PATTERNS = [
@@ -38,7 +39,10 @@ def is_empty_content(content: str | None, threshold: int = 200) -> bool:
     return False
 
 
-async def render_playwright(url: str, timeout: int = 30000, wait_until: str = "networkidle") -> str | None:
+WaitUntil = Literal["commit", "domcontentloaded", "load", "networkidle"]
+
+
+async def render_playwright(url: str, timeout: int = 30000, wait_until: WaitUntil = "networkidle") -> str | None:
     """Render a URL with Playwright headless browser, then extract with trafilatura.
 
     Returns extracted markdown content or None on failure.
@@ -86,8 +90,7 @@ async def render_tavily(url: str, api_key: str, extract_depth: str = "advanced",
         log("No TAVILY_API_KEY for fetch fallback")
         return None
 
-    from . import search
-    result = await search.extract_tavily(
+    result = await extract_tavily(
         [url], extract_depth=extract_depth, fmt=fmt, timeout=timeout,
         query=query, chunks_per_source=chunks_per_source,
     )
@@ -121,7 +124,8 @@ async def render_with_fallback(url: str, config: dict, query: str | None = None)
 
     if renderer == "tavily":
         tv_conf = config.get("tavily", {})
-        api_key = os.environ.get("TAVILY_API_KEY", "").strip()
+        from .validation import _load_env_key
+        api_key = _load_env_key("TAVILY_API_KEY") or ""
         return await render_tavily(
             url, api_key,
             extract_depth=tv_conf.get("extract_depth", "advanced"),

@@ -5,54 +5,44 @@ from pivot_web_search_mcp import server
 
 class TestApplySmartDefaults:
     def test_latest_sets_timelimit(self):
-        kwargs = {"timelimit": None}
-        server._apply_smart_defaults("latest React features", kwargs)
-        assert kwargs["timelimit"] == "m"
+        out = server._apply_smart_defaults("latest React features", {"timelimit": None})
+        assert out["timelimit"] == "m"
 
     def test_recent_sets_timelimit(self):
-        kwargs = {"timelimit": None}
-        server._apply_smart_defaults("recent AI breakthroughs", kwargs)
-        assert kwargs["timelimit"] == "m"
+        out = server._apply_smart_defaults("recent AI breakthroughs", {"timelimit": None})
+        assert out["timelimit"] == "m"
 
     def test_year_sets_timelimit(self):
-        kwargs = {"timelimit": None}
-        server._apply_smart_defaults("Python 2026 features", kwargs)
-        assert kwargs["timelimit"] == "m"
+        out = server._apply_smart_defaults("Python 2026 features", {"timelimit": None})
+        assert out["timelimit"] == "m"
 
     def test_chinese_sets_timelimit(self):
-        kwargs = {"timelimit": None}
-        server._apply_smart_defaults("最新的 AI 技术", kwargs)
-        assert kwargs["timelimit"] == "m"
+        out = server._apply_smart_defaults("最新的 AI 技术", {"timelimit": None})
+        assert out["timelimit"] == "m"
 
     def test_no_pattern_no_change(self):
-        kwargs = {"timelimit": None}
-        server._apply_smart_defaults("React features", kwargs)
-        assert kwargs["timelimit"] is None
+        out = server._apply_smart_defaults("React features", {"timelimit": None})
+        assert out["timelimit"] is None
 
     def test_explicit_param_wins(self):
-        kwargs = {"timelimit": "y"}
-        server._apply_smart_defaults("latest React features", kwargs)
-        assert kwargs["timelimit"] == "y"
+        out = server._apply_smart_defaults("latest React features", {"timelimit": "y"})
+        assert out["timelimit"] == "y"
 
     def test_news_detection(self):
-        kwargs = {"news": None}
-        server._apply_smart_defaults("news about AI", kwargs)
-        assert kwargs["news"] is True
+        out = server._apply_smart_defaults("news about AI", {"news": None})
+        assert out["news"] is True
 
     def test_news_explicit_false_respected(self):
-        kwargs = {"news": False}
-        server._apply_smart_defaults("breaking news AI", kwargs)
-        assert kwargs["news"] is False
+        out = server._apply_smart_defaults("breaking news AI", {"news": False})
+        assert out["news"] is False
 
     def test_released_sets_news(self):
-        kwargs = {"news": None}
-        server._apply_smart_defaults("Apple released new iPhone", kwargs)
-        assert kwargs["news"] is True
+        out = server._apply_smart_defaults("Apple released new iPhone", {"news": None})
+        assert out["news"] is True
 
     def test_no_news_pattern(self):
-        kwargs = {"news": None}
-        server._apply_smart_defaults("Python tutorial", kwargs)
-        assert kwargs["news"] is None
+        out = server._apply_smart_defaults("Python tutorial", {"news": None})
+        assert out["news"] is None
 
 
 class TestFilterByDomains:

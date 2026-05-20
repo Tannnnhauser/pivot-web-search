@@ -13,14 +13,15 @@ Providers auto-reset on first access after their period rolls over.
 """
 
 import json
-import os
 import pathlib
 import time
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
 
 from filelock import FileLock
 
+from .http_client import _open_with_fallback
 from .logging import log
 
 _PACIFIC = ZoneInfo("America/Los_Angeles")
@@ -116,6 +117,19 @@ def _ensure_period(data, provider):
     return data
 
 
+def _normalize_exhausted_until(entry):
+    exhausted_until = entry.get("exhausted_until")
+    if not exhausted_until:
+        return
+    try:
+        exhausted_dt = datetime.fromisoformat(exhausted_until)
+    except (ValueError, TypeError):
+        entry.pop("exhausted_until", None)
+        return
+    if exhausted_dt <= datetime.now(timezone.utc):
+        entry.pop("exhausted_until", None)
+
+
 def load_quota():
     """Load full quota state, auto-resetting stale periods. Cached for 5s."""
     global _quota_cache, _quota_cache_ts
@@ -126,6 +140,7 @@ def load_quota():
     changed = False
     for provider in list(data.keys()):
         entry = data[provider]
+        _normalize_exhausted_until(entry)
         period = entry.get("period", "monthly")
         needs_reset = False
         if period == "daily":
@@ -164,9 +179,19 @@ def record_usage(provider_name):
         if not isinstance(data, dict):
             data = {}
         _ensure_period(data, provider_name)
-        data[provider_name]["used"] = data[provider_name].get("used", 0) + 1
+        prev_used = data[provider_name].get("used", 0)
+        new_used = prev_used + 1
+        data[provider_name]["used"] = new_used
         _QUOTA_FILE.write_text(json.dumps(data, indent=2))
+        limit = data[provider_name].get("limit")
     _quota_cache = None
+
+    # Warn when crossing 80% threshold (one-shot per period).
+    if limit and limit > 0:
+        prev_pct = (prev_used / limit) * 100.0
+        new_pct = (new_used / limit) * 100.0
+        if prev_pct < 80.0 <= new_pct:
+            log(f"WARN {provider_name} quota at {new_pct:.0f}% ({new_used}/{limit})")
 
 
 def update_from_brave_headers(headers):
@@ -213,10 +238,13 @@ def update_from_brave_headers(headers):
         "remaining": monthly_remaining,
         "source": "header",
         "last_synced": datetime.now(timezone.utc).isoformat(),
+        "reset_at": reset_at,
     })
-    if reset_at:
-        data["brave"]["reset_at"] = reset_at
-    _write_file(data)
+    try:
+        _write_file(data)
+    except OSError as e:
+        log(f"quota write failed (brave headers): {e}")
+        return
     _quota_cache = None
 
 
@@ -226,7 +254,8 @@ async def sync_tavily_usage(api_key=None):
     Rate-limited to 1 call per minute. Returns True on success.
     """
     if not api_key:
-        api_key = os.environ.get("TAVILY_API_KEY", "").strip()
+        from .validation import _load_env_key
+        api_key = _load_env_key("TAVILY_API_KEY")
     if not api_key:
         return False
 
@@ -243,8 +272,7 @@ async def sync_tavily_usage(api_key=None):
             pass
 
     try:
-        from . import search
-        resp = await search._open_with_fallback(
+        resp = await _open_with_fallback(
             "GET", _TAVILY_USAGE_URL,
             headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
             timeout=10)
@@ -281,6 +309,36 @@ def set_provider_limit(provider_name, limit, period="monthly"):
     _write_file(data)
 
 
+def mark_rate_limited(provider_name, retry_after):
+    """Mark a provider unavailable until its Retry-After deadline."""
+    if not retry_after:
+        return False
+
+    now = datetime.now(timezone.utc)
+    exhausted_until = None
+
+    try:
+        delay_s = int(str(retry_after).strip())
+        exhausted_until = now + timedelta(seconds=max(delay_s, 0))
+    except (TypeError, ValueError):
+        try:
+            parsed = parsedate_to_datetime(str(retry_after).strip())
+            exhausted_until = parsed.astimezone(timezone.utc)
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return False
+
+    if exhausted_until is None or exhausted_until <= now:
+        return False
+
+    data = _read_file()
+    _ensure_period(data, provider_name)
+    data[provider_name]["exhausted_until"] = exhausted_until.isoformat()
+    _write_file(data)
+    global _quota_cache
+    _quota_cache = None
+    return True
+
+
 def get_usage_pct(provider_name):
     """Return usage percentage (0.0–100.0+). Returns 0.0 if no limit configured."""
     data = load_quota()
@@ -296,10 +354,50 @@ def is_exhausted(provider_name):
     """Return True if provider has hit or exceeded its quota limit."""
     data = load_quota()
     entry = data.get(provider_name, {})
+    exhausted_until = entry.get("exhausted_until")
+    if exhausted_until:
+        try:
+            if datetime.fromisoformat(exhausted_until) > datetime.now(timezone.utc):
+                return True
+        except (ValueError, TypeError):
+            pass
     limit = entry.get("limit")
     if not limit or limit <= 0:
         return False
     return entry.get("used", 0) >= limit
+
+
+def retry_after_seconds(provider_name):
+    """Seconds remaining until the rate-limit window expires, or None if not rate-limited."""
+    data = load_quota()
+    entry = data.get(provider_name, {})
+    exhausted_until = entry.get("exhausted_until")
+    if not exhausted_until:
+        return None
+    try:
+        deadline = datetime.fromisoformat(exhausted_until)
+    except (ValueError, TypeError):
+        return None
+    remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
+    return max(0, int(remaining)) if remaining > 0 else None
+
+
+def would_exhaust_on_next_use(provider_name):
+    """Return True when one more call would leave the provider exhausted."""
+    data = load_quota()
+    entry = data.get(provider_name, {})
+    exhausted_until = entry.get("exhausted_until")
+    if exhausted_until:
+        try:
+            if datetime.fromisoformat(exhausted_until) > datetime.now(timezone.utc):
+                return True
+        except (ValueError, TypeError):
+            pass
+    limit = entry.get("limit")
+    if not limit or limit <= 0:
+        return False
+    used = entry.get("used", 0)
+    return (limit - used) <= 1
 
 
 def get_quota_summary():

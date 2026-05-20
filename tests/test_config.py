@@ -1,7 +1,7 @@
 """Configuration loading tests — env, YAML, and defaults priority."""
 
 
-from pivot_web_search_mcp import providers
+from pivot_web_search_mcp import config, providers
 
 
 class TestProviderRegistryFromEnv:
@@ -67,26 +67,26 @@ class TestProviderRegistryFromYaml:
 class TestLoadProxies:
     def test_from_env(self, monkeypatch):
         monkeypatch.setenv("PIVOT_WEB_SEARCH_PROXIES", "direct,http://myproxy:8080")
-        result = providers.load_proxies()
+        result = config.load_proxies()
         assert result == [None, "http://myproxy:8080"]
 
     def test_direct_maps_to_none(self, monkeypatch):
         monkeypatch.setenv("PIVOT_WEB_SEARCH_PROXIES", "direct")
-        result = providers.load_proxies()
+        result = config.load_proxies()
         assert result == [None]
 
     def test_trailing_comma_ignored(self, monkeypatch):
         monkeypatch.setenv("PIVOT_WEB_SEARCH_PROXIES", "direct,")
-        result = providers.load_proxies()
+        result = config.load_proxies()
         assert result == [None]
 
     def test_spaces_stripped(self, monkeypatch):
         monkeypatch.setenv("PIVOT_WEB_SEARCH_PROXIES", " direct , http://p:80 ")
-        result = providers.load_proxies()
+        result = config.load_proxies()
         assert result == [None, "http://p:80"]
 
     def test_defaults_when_no_env(self, monkeypatch):
         monkeypatch.delenv("PIVOT_WEB_SEARCH_PROXIES", raising=False)
-        result = providers.load_proxies(config_path="/nonexistent.yaml")
+        result = config.load_proxies(config_path="/nonexistent.yaml")
         assert len(result) > 0
         assert None in result  # direct is always included in defaults

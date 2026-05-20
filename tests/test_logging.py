@@ -34,6 +34,9 @@ class TestLog:
             monkeypatch.setattr(wsl, "_log_fh", None)
             monkeypatch.setattr(wsl, "_DEBUG", True)
             wsl.log("debug test message")
+            if wsl._log_fh is not None:
+                wsl._log_fh.close()
+                wsl._log_fh = None
             assert log_file.exists()
             content = log_file.read_text()
             assert "debug test message" in content

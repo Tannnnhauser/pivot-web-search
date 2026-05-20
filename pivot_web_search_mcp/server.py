@@ -11,34 +11,35 @@ Exposes three tools:
 Run: python3 server.py  (stdio transport)
 """
 
-import asyncio
 import json
 import os
 import re as _re
 import urllib.parse
-from dataclasses import dataclass, field
 
 from fastmcp import FastMCP
 
 from . import quota as _quota
-from . import search
-from .logging import log
-from .providers import (
-    ProviderRegistry,
-    SearchResult,
+from .backends import search_brave_llm_context
+from .config import (
     get_fetch_config_source,
     get_proxy_config_source,
+    load_fetch_config,
     load_proxies,
     reload_proxies,
 )
-from .routing import CircuitBreaker, pick_recovery_candidate, route_providers
-from .search import dedup_and_rank
-
-
-@dataclass
-class _FailureInfo:
-    """Carries per-provider failure details when all providers fail."""
-    failures: list = field(default_factory=list)
+from .extraction import extract_trafilatura
+from .logging import log
+from .providers import ProviderRegistry
+from .results import to_markdown
+from .routing import (
+    CircuitBreaker,
+    FailureInfo,
+    ScoredProvider,
+    attempt_single,
+    execute_search,
+    execute_super_search,
+)
+from .validation import MAX_CONTENT_CHARS, validate_url
 
 
 def _redact_proxy_url(url):
@@ -69,6 +70,10 @@ def _build_instructions():
 # Global registry — initialized once, auto-reloads on config change
 _registry = ProviderRegistry()
 _registry.load()
+
+_enabled = [p for p in _registry.get_ordered() if p.enabled]
+log(f"Pivot Web Search loaded: {len(_enabled)} providers enabled "
+    f"({', '.join(p.name for p in _enabled) if _enabled else 'none'})")
 
 mcp = FastMCP("pivot-web-search", instructions=_build_instructions())
 
@@ -112,108 +117,34 @@ def _filter_by_domains(results, allowed_domains, blocked_domains):
 _breaker = CircuitBreaker()
 
 
-def _record_outcome(provider, result):
-    """Record search outcome to circuit breaker."""
-    if result is None or (hasattr(result, "results") and not result.results):
-        _breaker.record(provider.name, success=False)
-    else:
-        _breaker.record(provider.name, success=True)
-
-
 async def _search_with_registry(query, max_results, provider_name="auto", **kwargs):
     """Run search through the provider registry with failover.
 
-    Quality-aware: continues to the next provider if results are too few.
-    Quota-aware: prefers providers with lower usage, skips exhausted ones.
-    Returns SearchResult, _FailureInfo (all failed), or None.
+    Explicit provider: direct attempt with health check, no quality gate.
+    Auto mode: priority-group execution with hedging and quality gate.
+    Returns SearchResult, FailureInfo (all failed), or None.
     """
     if provider_name and provider_name != "auto":
         p = _registry.get_by_name(provider_name)
-        if p and p.enabled:
-            result = await p.search(query, max_results, **kwargs)
-            if result is not None:
-                _quota.record_usage(p.name)
-            _record_outcome(p, result)
-            return result
-        return None
+        if not p:
+            return FailureInfo(failures=[{"provider": provider_name, "error": f"unknown provider '{provider_name}'"}])
+        if not p.enabled:
+            return FailureInfo(failures=[{"provider": provider_name, "error": "provider is disabled"}])
+        ok, detail = await p.health_check()
+        if not ok:
+            return FailureInfo(failures=[{"provider": provider_name, "error": detail or "health check failed"}])
 
-    is_news = kwargs.get("news", False)
-    ordered = route_providers(_registry.get_ordered(), _breaker, is_news=is_news)
+        scored = ScoredProvider(provider=p, effective_priority=0, call_counter=0, rr_seed=0)
+        attempt = await attempt_single(scored, query, max_results, _breaker, **kwargs)
+        if attempt.result is not None:
+            return attempt.result
+        return FailureInfo(failures=[{"provider": p.name, "error": attempt.error or "unknown"}])
 
-    if not ordered:
-        recovery = pick_recovery_candidate(_registry.get_ordered(), _breaker)
-        if recovery:
-            ordered = [recovery]
-
-    min_acceptable = min(2, max_results)
-    best_so_far = None
-    failure_details = []
-
-    for p in ordered:
-        try:
-            result = await p.search(query, max_results, **kwargs)
-        except Exception as e:
-            failure_details.append({"provider": p.name, "error": str(e)})
-            _record_outcome(p, None)
-            continue
-        _record_outcome(p, result)
-        if result is not None and len(result.results) >= min_acceptable:
-            _quota.record_usage(p.name)
-            return result
-        if result is not None and (best_so_far is None or len(result.results) > len(best_so_far.results)):
-            best_so_far = result
-            _quota.record_usage(p.name)
-            log(
-                f"{p.name} returned only {len(result.results)} results, trying next provider"
-            )
-        elif result is None:
-            failure_details.append({"provider": p.name, "error": "returned no results"})
-
-    if best_so_far is not None:
-        return best_so_far
-    return _FailureInfo(failures=failure_details)
-
-
-async def _search_super_with_registry(query, max_results, **kwargs):
-    """Query all enabled providers in parallel, deduplicate and rank.
-
-    Super mode ignores breaker state (maximum coverage) but records outcomes.
-    Quota-aware: skips exhausted providers. Records usage for all that returned results.
-    Returns SearchResult or None.
-    """
-    providers = [p for p in _registry.get_ordered() if not _quota.is_exhausted(p.name)]
-    if not providers:
-        return None
-
-    results_by_provider = {}
-    answer = None
-
-    tasks = [p.search(query, max_results, **kwargs) for p in providers]
-    search_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    for p, sr in zip(providers, search_results):
-        if isinstance(sr, Exception):
-            log(f"super: {p.name} failed: {sr}")
-            _record_outcome(p, None)
-            continue
-        _record_outcome(p, sr)
-        if sr and sr.results:
-            results_by_provider[p.name] = sr.results
-            _quota.record_usage(p.name)
-            log(f"super: {p.name} returned {len(sr.results)} results")
-            if sr.answer and not answer:
-                answer = sr.answer
-        else:
-            log(f"super: {p.name} returned nothing")
-
-    if not results_by_provider:
-        return None
-
-    merged, providers_used = dedup_and_rank(results_by_provider, max_results)
-    return SearchResult(
-        results=merged,
-        provider=",".join(providers_used),
-        answer=answer,
+    # Auto mode: delegate to routing engine
+    affinity = kwargs.pop("affinity", "general")
+    return await execute_search(
+        query, max_results, _registry.get_ordered(), _breaker,
+        affinity=affinity, **kwargs,
     )
 
 
@@ -225,11 +156,12 @@ _NEWS_PATTERN = _re.compile(
 
 def _apply_smart_defaults(query, kwargs):
     """Detect query characteristics and set soft defaults for unset parameters."""
-    if kwargs.get("timelimit") is None and _TIME_SENSITIVE_PATTERN.search(query):
-        kwargs["timelimit"] = "m"
-    if kwargs.get("news") is None and _NEWS_PATTERN.search(query):
-        kwargs["news"] = True
-    return kwargs
+    result = dict(kwargs)
+    if result.get("timelimit") is None and _TIME_SENSITIVE_PATTERN.search(query):
+        result["timelimit"] = "m"
+    if result.get("news") is None and _NEWS_PATTERN.search(query):
+        result["news"] = True
+    return result
 
 
 def _format_content_results(results, query):
@@ -254,14 +186,16 @@ def _format_content_results(results, query):
 def _build_failure_suggestions(failures):
     """Generate actionable suggestions based on failure patterns."""
     suggestions = []
-    error_texts = " ".join(f.get("error", "") for f in failures).lower()
+    error_texts = " ".join(
+        f"{f.get('error', '')} {f.get('state', '')}" for f in failures
+    ).lower()
 
     if "api key" in error_texts or "no tavily" in error_texts or "no brave" in error_texts:
         suggestions.append("Configure API keys via plugin settings (Tavily, Brave, or Gemini)")
-    if "timeout" in error_texts or "connection" in error_texts:
+    if "timeout" in error_texts or "connection" in error_texts or "tcp_failure" in error_texts:
         suggestions.append("Check network connectivity or configure proxies in config/proxies.yaml")
-    if "rate" in error_texts or "429" in error_texts or "quota" in error_texts:
-        suggestions.append("Provider rate-limited — wait and retry, or switch providers")
+    if "rate" in error_texts or "429" in error_texts or "quota" in error_texts or "circuit_open" in error_texts:
+        suggestions.append("Provider rate-limited or in cooldown — wait and retry, or switch providers")
     if not suggestions:
         suggestions.append("Run WebSearchConfig status to check provider health")
     return suggestions
@@ -330,13 +264,14 @@ async def WebSearch(
             "exclude_domains": exclude_domains,
         }
 
-        _apply_smart_defaults(query, search_kwargs)
+        search_kwargs = _apply_smart_defaults(query, search_kwargs)
 
         # include_content mode: try Brave LLM Context first (search + content in one call)
+        content_downgrade_reason = None
         if include_content and not news:
             freshness_map = {"d": "pd", "w": "pw", "m": "pm", "y": "py"}
             freshness = freshness_map.get(search_kwargs.get("timelimit", ""))
-            llm_result = await search.search_brave_llm_context(
+            llm_result = await search_brave_llm_context(
                 query, max_results=max_results,
                 max_tokens=max_content_tokens,
                 freshness=freshness,
@@ -348,24 +283,34 @@ async def WebSearch(
                 if include_domains or exclude_domains:
                     results = _filter_by_domains(results, include_domains, exclude_domains)
                 if results:
-                    _breaker.record("brave", success=True)
+                    _breaker.record_success("brave")
                     return _format_content_results(results, query)
-            _breaker.record("brave", success=(llm_result is not None))
+                _breaker.record_success("brave")
+                content_downgrade_reason = "Brave LLM Context returned no results"
+            else:
+                _breaker.record_failure("brave")
+                content_downgrade_reason = "Brave LLM Context unavailable"
+        elif include_content and news:
+            content_downgrade_reason = "include_content not supported in news mode"
 
         sr = None
 
         if super_mode:
             max_results = max(1, min(max_results, 20))
             search_kwargs["include_answer"] = True
-            sr = await _search_super_with_registry(query, max_results, **search_kwargs)
+            affinity = search_kwargs.pop("affinity", "general")
+            sr = await execute_super_search(
+                query, max_results, _registry.get_ordered(), _breaker,
+                affinity=affinity, **search_kwargs,
+            )
             if sr and (include_domains or exclude_domains):
                 sr.results = _filter_by_domains(sr.results, include_domains, exclude_domains)
         else:
             max_results = max(1, min(max_results, 10))
             sr = await _search_with_registry(query, max_results, provider, **search_kwargs)
 
-        if sr is None or isinstance(sr, _FailureInfo) or not sr.results:
-            failures = sr.failures if isinstance(sr, _FailureInfo) else []
+        if sr is None or isinstance(sr, FailureInfo) or not sr.results:
+            failures = sr.failures if isinstance(sr, FailureInfo) else []
             return json.dumps({
                 "error": "All providers failed",
                 "query": query,
@@ -373,7 +318,7 @@ async def WebSearch(
                 "suggestions": _build_failure_suggestions(failures),
             }, indent=2)
 
-        return search.to_markdown(sr.results, query, sr.answer, sr.provider)
+        return to_markdown(sr.results, query, sr.answer, sr.provider, content_downgrade_reason)
 
     except Exception as e:
         return json.dumps({"error": str(e), "query": query})
@@ -382,28 +327,23 @@ async def WebSearch(
 @mcp.tool
 async def WebFetch(
     url: str | list[str],
-    prompt: str,
     query: str | None = None,
     max_chars: int | None = None,
 ) -> str:
     """Fetch and extract content from a URL. Uses trafilatura with Next.js/Nuxt.js SPA fallback.
     Connection failover: direct -> configured proxies.
 
-    The prompt is returned alongside the extracted content for the model to apply.
-    No server-side filtering or summarization is performed — the calling model should
-    use the prompt to focus on the relevant parts of the returned content.
+    No server-side filtering or summarization is performed.
 
     No JavaScript execution. Content truncated at 100K characters.
     Binary content (images, PDFs, zips) is detected and rejected with a descriptive message.
 
     Args:
         url: The URL to fetch content from (http/https only, auto-upgrades http to https)
-        prompt: Passed through alongside content — the server does NOT filter. Apply the prompt yourself
         query: Optional relevance query — when set, JS fallback renderers use it for focused extraction
         max_chars: Override default content truncation limit (default: from config or 100K)
     """
     from . import fetch as _fetch
-    from .providers import load_fetch_config
 
     # Normalize to list
     urls = url if isinstance(url, list) else [url]
@@ -416,19 +356,19 @@ async def WebFetch(
         if not u or not u.strip():
             continue
         try:
-            validated.append(search.validate_url(u))
+            validated.append(validate_url(u))
         except ValueError as e:
             if len(urls) == 1:
                 return json.dumps({"error": str(e), "url": u})
             validated.append(None)
 
     fetch_config = load_fetch_config()
-    truncation_limit = max_chars if max_chars else fetch_config.get("max_chars", search.MAX_CONTENT_CHARS)
+    truncation_limit = max_chars if max_chars else fetch_config.get("max_chars", MAX_CONTENT_CHARS)
     empty_threshold = fetch_config.get("empty_threshold", 200)
 
     try:
         valid_urls = [u for u in validated if u]
-        result = await search.extract_trafilatura(valid_urls)
+        result = await extract_trafilatura(valid_urls)
 
         extracted = {r["url"]: r["raw_content"] for r in result.get("results", []) if r.get("raw_content")}
         failed_urls = {f["url"] for f in result.get("failed_results", [])}
@@ -455,7 +395,7 @@ async def WebFetch(
             u, content, error = final_contents[0] if final_contents else (urls[0], None, "unknown error")
             if error:
                 return json.dumps({"error": error, "url": u})
-            return f"Source: {u}\nExtraction prompt: {prompt}\n\n---\n\n{content}"
+            return f"Source: {u}\n\n---\n\n{content}"
 
         # Batch mode — structured multi-URL output
         parts = []
@@ -466,7 +406,7 @@ async def WebFetch(
                 parts.append(f"## {u}\n\n{content}")
 
         extracted_count = len([c for _, c, e in final_contents if c])
-        header = f"Extraction prompt: {prompt}\nURLs extracted: {extracted_count}/{len(valid_urls)}"
+        header = f"URLs extracted: {extracted_count}/{len(valid_urls)}"
         return f"{header}\n\n---\n\n" + "\n\n---\n\n".join(parts)
 
     except Exception as e:
@@ -489,25 +429,28 @@ async def WebSearchConfig(
     if action == "reload":
         _registry.reload()
         proxies = reload_proxies()
+        _breaker.reset_all()
         providers = _registry.get_all()
         return json.dumps({
             "action": "reload",
             "providers_loaded": len(providers),
             "proxies_loaded": len(proxies),
             "providers_config": _registry.config_source,
+            "breaker": "reset",
         }, indent=2)
 
     # status
     providers = _registry.get_all()
     quota_summary = _quota.get_quota_summary()
     provider_info = []
-    for p in sorted(providers, key=lambda x: x.priority):
+    for p in sorted(providers, key=lambda x: x.effective_priority):
         available, detail = await p.health_check()
         info = {
             "name": p.name,
             "type": p.provider_type,
-            "tier": p.tier,
-            "priority": p.priority,
+            "priority": p.effective_priority,
+            "affinity": p.affinity,
+            "timeout": p.timeout_seconds,
             "enabled": p.enabled,
             "available": available,
             "detail": detail,

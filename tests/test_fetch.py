@@ -73,7 +73,7 @@ class TestRenderTavily:
         result = await fetch.render_tavily("https://example.com", api_key="")
         assert result is None
 
-    @patch("pivot_web_search_mcp.search.extract_tavily", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.fetch.extract_tavily", new_callable=AsyncMock)
     async def test_success(self, mock_extract):
         mock_extract.return_value = {
             "results": [{"url": "https://example.com", "raw_content": "# Hello\n\nExtracted content"}],
@@ -85,7 +85,7 @@ class TestRenderTavily:
         call_kwargs = mock_extract.call_args
         assert call_kwargs[1]["extract_depth"] == "advanced"
 
-    @patch("pivot_web_search_mcp.search.extract_tavily", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.fetch.extract_tavily", new_callable=AsyncMock)
     async def test_with_query(self, mock_extract):
         mock_extract.return_value = {
             "results": [{"url": "https://example.com", "raw_content": "Relevant chunk"}],
@@ -95,7 +95,7 @@ class TestRenderTavily:
         call_kwargs = mock_extract.call_args
         assert call_kwargs[1]["query"] == "python frameworks"
 
-    @patch("pivot_web_search_mcp.search.extract_tavily", new_callable=AsyncMock)
+    @patch("pivot_web_search_mcp.fetch.extract_tavily", new_callable=AsyncMock)
     async def test_extraction_failed(self, mock_extract):
         mock_extract.return_value = {
             "results": [],

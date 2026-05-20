@@ -87,6 +87,24 @@ class TestBraveHeaders:
         data = quota.load_quota()
         assert "brave" not in data
 
+    def test_brave_reset_at_cleared_when_header_missing(self):
+        headers_with_reset = {
+            "X-RateLimit-Remaining": "1, 14000",
+            "X-RateLimit-Limit": "1, 15000",
+            "X-RateLimit-Reset": "1, 1209600",
+        }
+        quota.update_from_brave_headers(headers_with_reset)
+        data = quota.load_quota()
+        assert data["brave"]["reset_at"] is not None
+
+        headers_no_reset = {
+            "X-RateLimit-Remaining": "1, 13000",
+            "X-RateLimit-Limit": "1, 15000",
+        }
+        quota.update_from_brave_headers(headers_no_reset)
+        data = quota.load_quota()
+        assert data["brave"]["reset_at"] is None
+
 
 class TestRollingReset:
     def test_rolling_resets_after_reset_at(self):
@@ -261,3 +279,14 @@ class TestDailyReset:
             data = quota.load_quota()
             assert data["gemini"]["used"] == 1
             assert data["gemini"]["day"] == "2099-03-20"
+
+
+class TestMalformedJsonRecovery:
+    def test_record_usage_recovers_from_corrupt_file(self):
+        quota._QUOTA_FILE.parent.mkdir(parents=True, exist_ok=True)
+        quota._QUOTA_FILE.write_text("{not json")
+        quota._quota_cache = None
+        quota.record_usage("brave")
+        raw = quota._QUOTA_FILE.read_text()
+        data = json.loads(raw)
+        assert data["brave"]["used"] == 1
