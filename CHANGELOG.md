@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- `LlmSearchProvider.health_check` now resolves the endpoint via the format strategy (`resolve_endpoint`) instead of reading `config["endpoint"]` directly, so Gemini (whose endpoint is derived from `model`) no longer reports a spurious `"no endpoint"` in `WebSearchConfig status`.
+- `PIVOT_WEB_SEARCH_PROVIDERS` env-var path no longer assigns sequential `(i+1)*10` priorities — it now defers to the same smart defaults as the YAML path (ddg → 90, tavily/brave/gemini → 20), so plugin users with the default `userConfig.providers` setting actually get Routing v2's hedged execution instead of v1-style linear failover.
+
 ### Added
 - Routing v2: priority-group failover with hedged execution
   - Same-priority providers fire concurrently with 200ms staggered starts; first quality-gate pass wins
@@ -49,7 +53,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Historical design drafts under `docs/` (gpt/, manus/, minimax/, routing-algorithm-codex.md, routing-algorithm-final.md, architecture.md duplicate)
 
 ### Tests
-- 305 offline + 7 integration = 312 total
+- 306 offline + 7 integration = 313 total
 
 ## [1.0.0] - 2026-04-28
 

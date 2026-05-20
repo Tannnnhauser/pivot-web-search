@@ -36,6 +36,10 @@ class LlmSearchFormat(ABC):
         answer_text: AI-generated summary or None
         """
 
+    def resolve_endpoint(self, config) -> str:
+        """Return the request URL this format will use, or "" if not configurable."""
+        return config.get("endpoint", "")
+
     def parse_error(self, status_code, body):
         """Extract error message from failed response."""
         if isinstance(body, dict):
@@ -228,10 +232,13 @@ class GeminiFormat(LlmSearchFormat):
 
     auth_style = "x-goog-api-key"
 
-    def build_request(self, query, max_results, config):
+    def resolve_endpoint(self, config):
         base_url = config.get("gemini_url", DEFAULT_GEMINI_URL)
         model = config.get("model", DEFAULT_GEMINI_MODEL)
-        endpoint = f"{base_url}/{model}:generateContent"
+        return f"{base_url}/{model}:generateContent"
+
+    def build_request(self, query, max_results, config):
+        endpoint = self.resolve_endpoint(config)
 
         headers = {"Content-Type": "application/json"}
 

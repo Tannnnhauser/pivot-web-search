@@ -188,7 +188,7 @@ class LlmSearchProvider(SearchProvider):
         return SearchResult(results=results, provider=self.name, answer=answer)
 
     async def health_check(self):
-        endpoint = self.config.get("endpoint")
+        endpoint = self._format.resolve_endpoint(self.config)
         if not endpoint:
             return False, "no endpoint"
         key = self._get_key()

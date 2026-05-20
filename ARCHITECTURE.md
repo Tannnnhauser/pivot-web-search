@@ -253,7 +253,7 @@ pivot-web-search/
 │   ├── fetch.py             # SPA detection, JS renderer dispatch
 │   ├── logging.py           # Centralized logging (stderr + optional file)
 │   └── quota.py             # Per-provider quota tracking, filelock (cross-platform)
-├── tests/                   # 312 tests (305 offline + 7 integration), 15 modules
+├── tests/                   # 313 tests (306 offline + 7 integration), 15 modules
 ├── skills/pivot-web-search/       # Skill definition for Claude Code
 └── docs/                    # Design documents (not tracked in git)
 ```
