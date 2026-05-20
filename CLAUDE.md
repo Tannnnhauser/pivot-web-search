@@ -37,16 +37,25 @@ Implications:
 - **JS rendering fallback**: Configure `config/fetch.yaml` with `js_renderer: playwright` or `tavily` to handle JavaScript-rendered SPAs. Playwright requires `uv sync --extra browser`.
 - **Brave LLM Context**: WebSearch with `include_content=true` uses Brave's LLM Context API for search+content in one call with token budget control.
 
+## Repository Layout
+
+This is a **subdirectory-layout marketplace repo**. The plugin payload lives at `plugins/pivot-web-search/` — that's what gets copied into a user's plugin cache. Repo-root files (`tests/`, `pyproject.toml`, `docs/`, etc.) are dev-only and never reach end users.
+
+- `plugins/pivot-web-search/` — `${CLAUDE_PLUGIN_ROOT}` at install time. Contains `.claude-plugin/plugin.json`, `.mcp.json`, `hooks/`, `skills/`, `scripts/`, `config/`, `pivot_web_search_mcp/`, `pyproject.toml`, `uv.lock`.
+- Repo root — workspace shell `pyproject.toml` (uv workspace, dev deps, lint/test config), `tests/`, marketplace manifest at `.claude-plugin/marketplace.json`.
+
+Tests run from the repo root via the workspace; `from pivot_web_search_mcp import ...` resolves through the workspace member install.
+
 ## Testing
 
 ```sh
-uv sync --extra dev
-pytest -m "not integration"     # 193 offline tests (~4s)
+uv sync                         # installs workspace + dev deps
+pytest -m "not integration"     # 306 offline tests (~5s)
 pytest                          # all tests including live API integration
 ```
 
 ## Development Rules
 
 - **Always update README** when implementing features, enhancements, or behavioral changes. Documentation must stay in sync with code — treat it as part of the implementation, not a follow-up.
-- **Run tests before committing** — all 193 offline tests must pass (`pytest -m "not integration"`).
+- **Run tests before committing** — all offline tests must pass (`pytest -m "not integration"`).
 - **Use `log()` from `pivot_web_search_mcp.logging`** for all diagnostic output. Never use `print(..., file=sys.stderr)` directly.

@@ -100,10 +100,10 @@ export BRAVE_API_KEY=BSA...
 export GEMINI_SEARCH_API_KEY=AI...   # or GOOGLE_STUDIO_API_KEY
 ```
 
-After manual installation, configure providers and proxies by editing the YAML files in the `config/` directory. To register the server with Claude Code, add it to your `.mcp.json` or run:
+After manual installation, configure providers and proxies by editing the YAML files in the `plugins/pivot-web-search/config/` directory. To register the server with Claude Code, add it to your `.mcp.json` or run:
 
 ```sh
-claude mcp add pivot-web-search "uv run --directory /path/to/pivot-web-search python -m pivot_web_search_mcp"
+claude mcp add pivot-web-search "uv run --directory /path/to/pivot-web-search/plugins/pivot-web-search python -m pivot_web_search_mcp"
 ```
 
 ### Uninstall
@@ -370,37 +370,43 @@ Quota-aware scheduling skips providers at 100% usage. Providers are ordered by p
 ## Architecture
 
 ```
-hooks/hooks.json        PreToolUse hook — blocks built-in WebSearch/WebFetch (fail-open)
-                        SessionStart hook — async health check on startup
+plugins/pivot-web-search/        Plugin payload — what gets installed into the user's plugin cache
+  .claude-plugin/plugin.json     Plugin manifest (userConfig schema)
+  .mcp.json                      MCP server registration (uv run -m pivot_web_search_mcp)
+  pyproject.toml + uv.lock       Runtime dependencies, resolved by uv at startup
+  hooks/hooks.json               PreToolUse hook — blocks built-in WebSearch/WebFetch (fail-open)
+                                 SessionStart hook — async health check on startup
+  pivot_web_search_mcp/          FastMCP server (stdio) — fully async, exposes 3 MCP tools
+    server.py                    Async tool handlers, failover orchestration, smart defaults
+    routing.py                   Priority-group routing, hedged execution, circuit breaker, quality gate
+    quality_gate.py              3-tier quality gate (answer/URLs/keywords)
+    backends.py                  Async search backends (DDG/Tavily/Brave/Gemini, httpx)
+    extraction.py                trafilatura wrapper for URL content extraction
+    http_client.py               Shared httpx client + proxy failover
+    results.py                   dedup_and_rank, markdown rendering
+    validation.py                URL/SSRF validation
+    config.py                    YAML config loaders (hot-reload)
+    defaults.py                  Smart-defaults priority table
+    providers/                   Subpackage: base (SearchProvider/SearchResult), adapters (6 built-ins + ADAPTER_MAP), registry (mtime hot-reload)
+    llm_search_formats.py        Strategy pattern for LLM search API formats (chat_completions, responses, gemini)
+    fetch.py                     SPA detection, async JS renderer dispatch (Playwright/Tavily)
+    quota.py                     Cross-session quota tracking (filelock, cross-platform)
+    logging.py                   Centralized logging (stderr + optional file via PIVOT_WEB_SEARCH_DEBUG)
+  config/                        YAML config for providers, proxies, and fetch (hot-reloadable)
+  scripts/
+    health-check.py              Startup probe — reports provider availability and quota
+    pretool-check.py             PreToolUse hook script — fail-open tool blocker
+  skills/pivot-web-search/       Skill definition surfaced to Claude Code
 
-pivot_web_search_mcp/         FastMCP server (stdio) — fully async, exposes 3 MCP tools
-  server.py             Async tool handlers, failover orchestration, smart defaults
-  routing.py            Priority-group routing, hedged execution, circuit breaker, quality gate
-  quality_gate.py       3-tier quality gate (answer/URLs/keywords)
-  backends.py           Async search backends (DDG/Tavily/Brave/Gemini, httpx)
-  extraction.py         trafilatura wrapper for URL content extraction
-  http_client.py        Shared httpx client + proxy failover
-  results.py            dedup_and_rank, markdown rendering
-  validation.py         URL/SSRF validation
-  config.py             YAML config loaders (hot-reload)
-  defaults.py           Smart-defaults priority table
-  providers/            Subpackage: base (SearchProvider/SearchResult), adapters (6 built-ins + ADAPTER_MAP), registry (mtime hot-reload)
-  llm_search_formats.py Strategy pattern for LLM search API formats (chat_completions, responses, gemini)
-  fetch.py              SPA detection, async JS renderer dispatch (Playwright/Tavily)
-  quota.py              Cross-session quota tracking (filelock, cross-platform)
-  logging.py            Centralized logging (stderr + optional file via PIVOT_WEB_SEARCH_DEBUG)
-
-config/                 YAML config for providers, proxies, and fetch (hot-reloadable)
-scripts/
-  health-check.py       Startup probe — reports provider availability and quota
-  pretool-check.py      PreToolUse hook script — fail-open tool blocker
-tests/                  313 tests across 15 modules (306 offline + 7 live integration, pytest-asyncio)
+.claude-plugin/marketplace.json  Marketplace manifest pointing to ./plugins/pivot-web-search
+tests/                           313 tests across 15 modules (306 offline + 7 live integration, pytest-asyncio)
+pyproject.toml                   Workspace shell — dev deps and lint/test config (no runtime code)
 ```
 
 ## Testing
 
 ```sh
-uv sync --extra dev                   # install dev dependencies
+uv sync                               # install workspace + dev dependencies
 pytest -m "not integration"           # 306 offline tests (~5s)
 pytest                                # 313 total (7 live integration, requires BRAVE/TAVILY keys)
 ```
