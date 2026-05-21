@@ -5,7 +5,7 @@
 ```sh
 git clone <repo-url>
 cd pivot-web-search
-uv sync --extra dev
+uv sync
 ```
 
 ## Running Tests

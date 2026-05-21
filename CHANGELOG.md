@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- **Repository layout migrated to subdirectory pattern.** Plugin payload now lives under `plugins/pivot-web-search/` (the `${CLAUDE_PLUGIN_ROOT}` at install time), keeping dev-only files (`tests/`, root `pyproject.toml`, docs, CI) at the repo root and out of users' plugin caches. Marketplace `source` updated to `./plugins/pivot-web-search`. Repo root is now a uv workspace; `uv sync` from root installs both runtime and dev deps. Aligns with the multi-plugin marketplace pattern used by trail-of-bits/skills-curated and others.
+
 ### Fixed
 - `LlmSearchProvider.health_check` now resolves the endpoint via the format strategy (`resolve_endpoint`) instead of reading `config["endpoint"]` directly, so Gemini (whose endpoint is derived from `model`) no longer reports a spurious `"no endpoint"` in `WebSearchConfig status`.
 - `PIVOT_WEB_SEARCH_PROVIDERS` env-var path no longer assigns sequential `(i+1)*10` priorities — it now defers to the same smart defaults as the YAML path (ddg → 90, tavily/brave/gemini → 20), so plugin users with the default `userConfig.providers` setting actually get Routing v2's hedged execution instead of v1-style linear failover.

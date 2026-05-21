@@ -216,46 +216,49 @@ graph TD
 ## File Structure
 
 ```
-pivot-web-search/
-├── .claude-plugin/          # Claude Code plugin manifest
-│   ├── plugin.json          # Tool declarations, userConfig schema
-│   └── marketplace.json     # Marketplace listing
-├── .mcp.json                # MCP server launch config (stdio)
-├── ARCHITECTURE.md          # This file
-├── config/
-│   ├── providers.yaml       # Search providers (type, priority, timeout, affinity)
-│   ├── proxies.yaml         # Proxy endpoints (failover order)
-│   └── fetch.yaml           # WebFetch config (JS renderer, limits)
-├── hooks/
-│   └── hooks.json           # PreToolUse block + SessionStart health
-├── scripts/
-│   ├── health-check.py      # Startup probe (parallel provider check)
-│   └── pretool-check.py     # PreToolUse hook — fail-open tool blocker
-├── pivot_web_search_mcp/
-│   ├── __init__.py
-│   ├── __main__.py          # Entry: mcp.run(transport="stdio")
-│   ├── server.py            # FastMCP server, 3 tools, smart defaults
-│   ├── backends.py          # HTTP adapters: DDG/Tavily/Brave/Gemini
-│   ├── extraction.py        # trafilatura wrapper
-│   ├── http_client.py       # Shared httpx client + proxy failover
-│   ├── results.py           # dedup_and_rank, markdown rendering
-│   ├── validation.py        # URL/SSRF validation
-│   ├── config.py            # YAML config loaders (hot-reload)
-│   ├── defaults.py          # Smart-defaults priority table
-│   ├── providers/           # Provider subpackage
-│   │   ├── __init__.py      # Public re-exports
-│   │   ├── base.py          # SearchProvider, SearchResult
-│   │   ├── adapters.py      # 6 adapters (Ddg/Tavily/Brave/LlmSearch/Searxng/JsonApi) + ADAPTER_MAP
-│   │   └── registry.py      # ProviderRegistry with mtime reload
-│   ├── llm_search_formats.py # Strategy pattern for LLM search API formats
-│   ├── routing.py           # Priority-group routing, hedging, circuit breaker
-│   ├── quality_gate.py      # 3-tier quality gate (answer/URLs/keywords)
-│   ├── fetch.py             # SPA detection, JS renderer dispatch
-│   ├── logging.py           # Centralized logging (stderr + optional file)
-│   └── quota.py             # Per-provider quota tracking, filelock (cross-platform)
-├── tests/                   # 313 tests (306 offline + 7 integration), 15 modules
-├── skills/pivot-web-search/       # Skill definition for Claude Code
-└── docs/                    # Design documents (not tracked in git)
+pivot-web-search/                      # marketplace + dev repo root
+├── .claude-plugin/
+│   └── marketplace.json               # Marketplace manifest → ./plugins/pivot-web-search
+├── plugins/pivot-web-search/          # Plugin payload (CLAUDE_PLUGIN_ROOT at install time)
+│   ├── .claude-plugin/plugin.json     # Tool declarations, userConfig schema
+│   ├── .mcp.json                      # MCP server launch config (stdio)
+│   ├── pyproject.toml + uv.lock       # Runtime deps, resolved by uv at startup
+│   ├── config/
+│   │   ├── providers.yaml             # Search providers (type, priority, timeout, affinity)
+│   │   ├── proxies.yaml               # Proxy endpoints (failover order)
+│   │   └── fetch.yaml                 # WebFetch config (JS renderer, limits)
+│   ├── hooks/
+│   │   └── hooks.json                 # PreToolUse block + SessionStart health
+│   ├── scripts/
+│   │   ├── health-check.py            # Startup probe (parallel provider check)
+│   │   └── pretool-check.py           # PreToolUse hook — fail-open tool blocker
+│   ├── pivot_web_search_mcp/
+│   │   ├── __init__.py
+│   │   ├── __main__.py                # Entry: mcp.run(transport="stdio")
+│   │   ├── server.py                  # FastMCP server, 3 tools, smart defaults
+│   │   ├── backends.py                # HTTP adapters: DDG/Tavily/Brave/Gemini
+│   │   ├── extraction.py              # trafilatura wrapper
+│   │   ├── http_client.py             # Shared httpx client + proxy failover
+│   │   ├── results.py                 # dedup_and_rank, markdown rendering
+│   │   ├── validation.py              # URL/SSRF validation
+│   │   ├── config.py                  # YAML config loaders (hot-reload)
+│   │   ├── defaults.py                # Smart-defaults priority table
+│   │   ├── providers/                 # Provider subpackage
+│   │   │   ├── __init__.py            # Public re-exports
+│   │   │   ├── base.py                # SearchProvider, SearchResult
+│   │   │   ├── adapters.py            # 6 adapters (Ddg/Tavily/Brave/LlmSearch/Searxng/JsonApi) + ADAPTER_MAP
+│   │   │   └── registry.py            # ProviderRegistry with mtime reload
+│   │   ├── llm_search_formats.py      # Strategy pattern for LLM search API formats
+│   │   ├── routing.py                 # Priority-group routing, hedging, circuit breaker
+│   │   ├── quality_gate.py            # 3-tier quality gate (answer/URLs/keywords)
+│   │   ├── fetch.py                   # SPA detection, JS renderer dispatch
+│   │   ├── logging.py                 # Centralized logging (stderr + optional file)
+│   │   └── quota.py                   # Per-provider quota tracking, filelock (cross-platform)
+│   └── skills/pivot-web-search/       # Skill definition for Claude Code
+├── tests/                             # 313 tests (306 offline + 7 integration), 15 modules
+├── pyproject.toml                     # uv workspace shell — dev deps + lint/test config
+├── ARCHITECTURE.md                    # This file
+└── docs/                              # Design documents (not tracked in git)
 ```
 
 ## Key Design Principles

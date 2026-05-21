@@ -5,7 +5,8 @@ import pathlib
 import subprocess
 
 _PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
-_HOOKS_JSON = _PROJECT_ROOT / "hooks" / "hooks.json"
+_PLUGIN_ROOT = _PROJECT_ROOT / "plugins" / "pivot-web-search"
+_HOOKS_JSON = _PLUGIN_ROOT / "hooks" / "hooks.json"
 
 
 def _get_hook_command():
@@ -21,7 +22,7 @@ def _get_hook_command():
 
 def _run_hook(tool_name):
     """Run the hook command via shell with the given tool_name as JSON stdin."""
-    cmd = _get_hook_command().replace("${CLAUDE_PLUGIN_ROOT}", str(_PROJECT_ROOT))
+    cmd = _get_hook_command().replace("${CLAUDE_PLUGIN_ROOT}", str(_PLUGIN_ROOT))
     result = subprocess.run(
         cmd, shell=True,
         input=json.dumps({"tool_name": tool_name}),
@@ -55,7 +56,7 @@ class TestPreToolUseHook:
 
     def test_fail_open_on_malformed_json(self):
         """Hook should exit 0 (allow) when given invalid JSON."""
-        cmd = _get_hook_command().replace("${CLAUDE_PLUGIN_ROOT}", str(_PROJECT_ROOT))
+        cmd = _get_hook_command().replace("${CLAUDE_PLUGIN_ROOT}", str(_PLUGIN_ROOT))
         result = subprocess.run(
             cmd, shell=True, input="not valid json",
             capture_output=True, text=True,
@@ -64,7 +65,7 @@ class TestPreToolUseHook:
 
     def test_fail_open_on_empty_stdin(self):
         """Hook should exit 0 (allow) when stdin is empty."""
-        cmd = _get_hook_command().replace("${CLAUDE_PLUGIN_ROOT}", str(_PROJECT_ROOT))
+        cmd = _get_hook_command().replace("${CLAUDE_PLUGIN_ROOT}", str(_PLUGIN_ROOT))
         result = subprocess.run(
             cmd, shell=True, input="",
             capture_output=True, text=True,
