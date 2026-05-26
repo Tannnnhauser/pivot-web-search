@@ -58,14 +58,14 @@ The plugin prompts for configuration at install time:
 
 | Setting | Description |
 |---|---|
-| **Search providers** | Comma-separated list in failover order (default: `ddg,tavily,brave,gemini`) |
-| **Tavily API Key** | Stored in system keychain. Leave empty to inherit `TAVILY_API_KEY` from the shell. |
-| **Brave Search API Key** | Stored in system keychain. Leave empty to inherit `BRAVE_API_KEY` from the shell. |
-| **Gemini API Key** | Stored in system keychain. Leave empty to inherit `GEMINI_SEARCH_API_KEY` (or `GOOGLE_STUDIO_API_KEY`) from the shell. |
-| **Proxy URLs** | Comma-separated, priority order. `direct` = no proxy (default: `direct`) |
-| **Gemini daily quota** | Optional. Limits Gemini grounded searches per day (resets at PT midnight). Check your limit at [AI Studio](https://aistudio.google.com/rate-limit). |
+| **Tavily API Key** | Stored in system keychain. Set to enable Tavily, leave empty to skip (or inherit `TAVILY_API_KEY` from the shell). |
+| **Brave Search API Key** | Stored in system keychain. Set to enable Brave, leave empty to skip (or inherit `BRAVE_API_KEY` from the shell). |
+| **Gemini API Key** | Stored in system keychain. Set to enable Gemini, leave empty to skip (or inherit `GEMINI_SEARCH_API_KEY` / `GOOGLE_STUDIO_API_KEY` from the shell). |
+| **Proxy URLs** | Comma-separated proxy URLs to try in order. `direct` is **always appended as the final fallback** — to disable that, use `~/.pivot-web-search/proxies.yaml`. |
 
-DDG needs no API key. Providers without a key are automatically skipped during failover.
+Providers are enabled automatically based on which keys you supply: each provider with a key (or its corresponding env var) is added to the routing chain. DDG is always enabled (no key needed). Routing order and timeouts are determined by [smart defaults](#configuration); the order you supply keys does not matter.
+
+For advanced setups (SearXNG, custom JSON APIs, LLM-search providers, SOCKS5 proxies, forced-proxy with no direct fallback), see [`~/.pivot-web-search/`](#configuration).
 
 **Key resolution order** — for each provider key, the plugin reads:
 1. The standard env var (e.g. `TAVILY_API_KEY`) inherited from the parent shell. **Wins if set.**
@@ -100,7 +100,7 @@ export BRAVE_API_KEY=BSA...
 export GEMINI_SEARCH_API_KEY=AI...   # or GOOGLE_STUDIO_API_KEY
 ```
 
-After manual installation, configure providers and proxies by editing the YAML files in the `plugins/pivot-web-search/config/` directory. To register the server with Claude Code, add it to your `.mcp.json` or run:
+After manual installation, set API keys via env vars (above) and — if you need advanced provider/proxy config — create the YAML files at `~/.pivot-web-search/providers.yaml` and `~/.pivot-web-search/proxies.yaml` (templates in [`examples/`](examples/)). To register the server with Claude Code, add it to your `.mcp.json` or run:
 
 ```sh
 claude mcp add pivot-web-search "uv run --directory /path/to/pivot-web-search/plugins/pivot-web-search python -m pivot_web_search_mcp"
@@ -179,11 +179,18 @@ The `status` action returns:
 
 ## Configuration
 
-Configuration priority (highest to lowest): **install-time config > YAML files > built-in defaults**.
+The plugin runs on **auto-detection** by default — supply API keys via the install-time UI (or shell env vars), and the matching providers are enabled automatically with smart routing defaults. No YAML required for the common case.
 
-Install-time settings (via `userConfig`) are injected as environment variables and take priority. YAML files serve as a power-user escape hatch for advanced setups (SearXNG, custom JSON APIs, SOCKS5 proxies). For simple changes, use `claude plugin configure pivot-web-search`. For advanced setups, edit the YAML files directly.
+For advanced setups, drop YAML files into `~/.pivot-web-search/`:
 
-### `config/providers.yaml`
+| File | Purpose |
+|---|---|
+| `~/.pivot-web-search/providers.yaml` | Take over provider config: SearXNG, custom JSON APIs, LLM-search providers, explicit priorities |
+| `~/.pivot-web-search/proxies.yaml` | Take over proxy config: SOCKS5, forced-proxy (no direct fallback), per-proxy priority |
+
+**Precedence is "all-or-nothing per file":** if `~/.pivot-web-search/providers.yaml` exists, auto-detection is bypassed entirely — list every provider you want enabled (including DDG). Same for proxies. Templates live in [`examples/`](examples/) — copy what you need.
+
+### `~/.pivot-web-search/providers.yaml`
 
 Providers are tried by priority (lower number = tried first). Same-priority providers are hedged — queried concurrently with staggered starts, first quality result wins. If no priority is set, smart defaults apply based on provider type.
 
@@ -251,7 +258,7 @@ providers:
 
 For LLM-based search — any model with built-in web search grounding (Perplexity Sonar Pro, OpenAI with web_search, SAP AI Core, etc.). These providers return an AI-generated answer plus cited URLs extracted from the response.
 
-This is a power-user feature. Configure by editing `config/providers.yaml` directly.
+This is a power-user feature. Configure by creating `~/.pivot-web-search/providers.yaml` (template at [`examples/providers.yaml`](examples/providers.yaml)).
 
 Two `api_format` paradigms are supported:
 
@@ -305,12 +312,14 @@ Additional `responses` format options: `filters` (domain filtering object), `use
 
 The existing `gemini` type is also backed by LLM search internally (using Google's Search grounding) but keeps its own `type: gemini` for backward compatibility and dual-key fallback logic.
 
-### `config/proxies.yaml`
+### `~/.pivot-web-search/proxies.yaml`
+
+When this file exists it takes over completely — the install-time `Proxy URLs` field is ignored, and `direct` is **not** auto-appended (escape hatch for forced-proxy / no-direct-fallback setups).
 
 ```yaml
 proxies:
   - name: direct
-    url: null             # direct connection
+    url: null             # null = direct connection
     enabled: true
     priority: 1
 
@@ -318,6 +327,12 @@ proxies:
     url: "http://myproxy1.example:8080"
     enabled: true
     priority: 2
+
+  # SOCKS5 (requires PySocks: uv pip install pysocks)
+  # - name: ssh-tunnel
+  #   url: "socks5://127.0.0.1:1080"
+  #   enabled: true
+  #   priority: 3
 ```
 
 ### `config/fetch.yaml`
@@ -392,14 +407,15 @@ plugins/pivot-web-search/        Plugin payload — what gets installed into the
     fetch.py                     SPA detection, async JS renderer dispatch (Playwright/Tavily)
     quota.py                     Cross-session quota tracking (filelock, cross-platform)
     logging.py                   Centralized logging (stderr + optional file via PIVOT_WEB_SEARCH_DEBUG)
-  config/                        YAML config for providers, proxies, and fetch (hot-reloadable)
+  config/                        Bundled fetch.yaml defaults (provider/proxy YAML lives in ~/.pivot-web-search/)
   scripts/
     health-check.py              Startup probe — reports provider availability and quota
     pretool-check.py             PreToolUse hook script — fail-open tool blocker
   skills/pivot-web-search/       Skill definition surfaced to Claude Code
 
 .claude-plugin/marketplace.json  Marketplace manifest pointing to ./plugins/pivot-web-search
-tests/                           313 tests across 15 modules (306 offline + 7 live integration, pytest-asyncio)
+examples/                        YAML templates for ~/.pivot-web-search/ — copy and edit for advanced setups
+tests/                           308 offline tests + live integration (pytest-asyncio)
 pyproject.toml                   Workspace shell — dev deps and lint/test config (no runtime code)
 ```
 
@@ -407,8 +423,8 @@ pyproject.toml                   Workspace shell — dev deps and lint/test conf
 
 ```sh
 uv sync                               # install workspace + dev dependencies
-pytest -m "not integration"           # 306 offline tests (~5s)
-pytest                                # 313 total (7 live integration, requires BRAVE/TAVILY keys)
+pytest -m "not integration"           # 308 offline tests (~5s)
+pytest                                # all tests including live integration (requires BRAVE/TAVILY keys)
 ```
 
 ## Troubleshooting
@@ -424,8 +440,7 @@ The plugin uses `certifi` for CA bundles. If you still see SSL errors:
 `uv sync --upgrade-package certifi`
 
 **Proxy timeouts / slow startup**
-The SessionStart health check runs asynchronously and never blocks your session. If you're not behind a proxy, ensure only `direct` is enabled in `config/proxies.yaml`
-or set Proxy URLs to `direct` via `claude plugin configure pivot-web-search`.
+The SessionStart health check runs asynchronously and never blocks your session. If you're not behind a proxy, leave the **Proxy URLs** field empty — `direct` is always the final fallback.
 
 **DuckDuckGo rate limiting (403 errors)**
 DDG occasionally rate-limits aggressive queries. The circuit breaker automatically detects consecutive failures and temporarily bypasses DDG (60s cooldown with probe-based recovery). DDG is restored once a probe request succeeds. For reliability, configure at least one API-backed provider.

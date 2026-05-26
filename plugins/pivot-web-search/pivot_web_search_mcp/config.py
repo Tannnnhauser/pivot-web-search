@@ -1,8 +1,9 @@
 """Configuration loaders for proxies, fetch, and the project YAML root.
 
 Reads tiny YAML files from disk with mtime-based caching so callers can
-hit these on every request cheaply. Env vars take precedence over YAML;
-YAML over defaults.
+hit these on every request cheaply. User YAML files live in
+~/.pivot-web-search/ and take precedence over env vars; env vars take
+precedence over built-in defaults.
 """
 
 import json
@@ -18,8 +19,9 @@ from .logging import log
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
-PROVIDERS_YAML = PROJECT_ROOT / "config" / "providers.yaml"
-PROXIES_YAML = PROJECT_ROOT / "config" / "proxies.yaml"
+USER_CONFIG_DIR = pathlib.Path.home() / ".pivot-web-search"
+USER_PROVIDERS_YAML = USER_CONFIG_DIR / "providers.yaml"
+USER_PROXIES_YAML = USER_CONFIG_DIR / "proxies.yaml"
 FETCH_YAML = PROJECT_ROOT / "config" / "fetch.yaml"
 
 try:
@@ -56,19 +58,17 @@ def cache_still_valid(path: pathlib.Path, cached_mtime: float) -> bool:
 # Proxies
 # ---------------------------------------------------------------------------
 
-_DEFAULT_PROXIES = [
-    {"name": "direct", "url": None, "enabled": True, "priority": 1},
-    {"name": "myproxy1", "url": "http://myproxy1.example:8080", "enabled": False, "priority": 2},
-    {"name": "myproxy2", "url": "http://myproxy2.example:8080", "enabled": False, "priority": 3},
-]
-
 _proxies_mtime = 0
 _proxies_list = None
 _proxies_lock = threading.Lock()
 
 
 def _load_proxies_from_env():
-    """Parse PIVOT_WEB_SEARCH_PROXIES into a proxy URL list (None = direct)."""
+    """Parse PIVOT_WEB_SEARCH_PROXIES into a proxy URL list (None = direct).
+
+    The list always ends with None as the final fallback — to disable that,
+    use ~/.pivot-web-search/proxies.yaml instead.
+    """
     raw = os.environ.get("PIVOT_WEB_SEARCH_PROXIES", "").strip()
     if not raw:
         return None
@@ -78,24 +78,18 @@ def _load_proxies_from_env():
         if not entry:
             continue
         result.append(None if entry.lower() == "direct" else entry)
-    return result if result else None
+    result.append(None)
+    return result
 
 
 def load_proxies(config_path=None):
-    """Load proxy list from env, YAML, or defaults (priority order)."""
+    """Load proxy list. Priority: user YAML > env var > [None] (direct only)."""
     global _proxies_mtime, _proxies_list
 
-    path = pathlib.Path(config_path) if config_path else PROXIES_YAML
+    path = pathlib.Path(config_path) if config_path else USER_PROXIES_YAML
 
     with _proxies_lock:
         if _proxies_list is not None and cache_still_valid(path, _proxies_mtime):
-            return _proxies_list
-
-        env_proxies = _load_proxies_from_env()
-        if env_proxies is not None:
-            _proxies_list = env_proxies
-            _proxies_mtime = time.time()
-            log(f"Loaded {len(env_proxies)} proxies from env PIVOT_WEB_SEARCH_PROXIES")
             return _proxies_list
 
         if path.exists():
@@ -125,9 +119,16 @@ def load_proxies(config_path=None):
                 log(f"Loaded {len(result)} proxies from {path}")
                 return result
             except Exception as e:
-                log(f"Failed to load {path}: {e} — using defaults")
+                log(f"Failed to load {path}: {e} — falling back to env / defaults")
 
-        _proxies_list = [e["url"] for e in _DEFAULT_PROXIES if e.get("enabled", True)]
+        env_proxies = _load_proxies_from_env()
+        if env_proxies is not None:
+            _proxies_list = env_proxies
+            _proxies_mtime = time.time()
+            log(f"Loaded {len(env_proxies)} proxies from env PIVOT_WEB_SEARCH_PROXIES")
+            return _proxies_list
+
+        _proxies_list = [None]
         _proxies_mtime = time.time()
         return _proxies_list
 
@@ -141,11 +142,11 @@ def reload_proxies():
 
 
 def get_proxy_config_source():
+    if USER_PROXIES_YAML.exists():
+        return {"source": "yaml", "path": str(USER_PROXIES_YAML)}
     raw = os.environ.get("PIVOT_WEB_SEARCH_PROXIES", "").strip()
     if raw:
         return {"source": "env", "env_var": "PIVOT_WEB_SEARCH_PROXIES", "value": raw}
-    if PROXIES_YAML.exists():
-        return {"source": "yaml", "path": str(PROXIES_YAML)}
     return {"source": "default"}
 
 
