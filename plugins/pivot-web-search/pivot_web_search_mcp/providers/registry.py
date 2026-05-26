@@ -2,63 +2,45 @@
 
 from __future__ import annotations
 
-import os
 import pathlib
 
-from ..config import PROVIDERS_YAML as _PROVIDERS_YAML
-from ..config import cache_still_valid
+from ..config import USER_PROVIDERS_YAML, cache_still_valid
 from ..config import load_yaml as _load_yaml
 from ..defaults import SMART_DEFAULT_PRIORITY
 from ..logging import log
+from ..validation import _load_env_key
 from .adapters import ADAPTER_MAP, DEFAULT_PROVIDERS
 
 
+def _auto_detect_entries():
+    """Build provider list from available API keys. DDG is always enabled."""
+    entries = [{"name": "ddg", "type": "ddg", "enabled": True}]
+    for default in DEFAULT_PROVIDERS:
+        if default["name"] == "ddg":
+            continue
+        primary = default.get("api_key_env")
+        fallback = default.get("api_key_env_fallback")
+        has_key = (primary and _load_env_key(primary)) or (fallback and _load_env_key(fallback))
+        if has_key:
+            entries.append(dict(default))
+    return entries
+
+
 class ProviderRegistry:
-    """Manages search providers loaded from config, with mtime-based reload."""
+    """Manages search providers loaded from user YAML or auto-detection, with mtime-based reload."""
 
     def __init__(self):
         self._providers = []
         self._config_path = None
         self._config_mtime = 0
-        self._from_env = False
-
-    def _load_from_env(self):
-        """Build provider list from PIVOT_WEB_SEARCH_PROVIDERS env var.
-
-        Returns (providers, source) or (None, None) if env var is not set.
-        """
-        raw = os.environ.get("PIVOT_WEB_SEARCH_PROVIDERS", "").strip()
-        if not raw:
-            return None, None
-
-        names = [n.strip().lower() for n in raw.split(",") if n.strip()]
-        if not names:
-            return None, None
-
-        entries = []
-        for name in names:
-            ptype = name
-            entry = {"name": name, "type": ptype, "enabled": True}
-            default = next((d for d in DEFAULT_PROVIDERS if d["name"] == name), None)
-            if default:
-                for k in ("api_key_env", "api_key_env_fallback", "api_format"):
-                    if k in default:
-                        entry[k] = default[k]
-            entries.append(entry)
-
-        providers = self._build_providers(entries)
-        return providers, f"env PIVOT_WEB_SEARCH_PROVIDERS={raw}"
+        self._auto_detected = False
 
     def load(self, config_path=None):
-        """Load providers from env var, YAML config, or defaults (in that priority)."""
-        self._config_path = pathlib.Path(config_path) if config_path else _PROVIDERS_YAML
+        """Load providers from user YAML, falling back to auto-detection from API keys."""
+        self._config_path = pathlib.Path(config_path) if config_path else USER_PROVIDERS_YAML
+        self._auto_detected = False
 
-        env_providers, env_source = self._load_from_env()
-        if env_providers is not None:
-            self._providers = env_providers
-            self._from_env = True
-            source = env_source
-        elif self._config_path.exists():
+        if self._config_path.exists():
             try:
                 data = _load_yaml(str(self._config_path))
                 self._config_mtime = self._config_path.stat().st_mtime
@@ -68,12 +50,14 @@ class ProviderRegistry:
                 self._providers = self._build_providers(entries)
                 source = str(self._config_path)
             except Exception as e:
-                log(f"Failed to load {self._config_path}: {e} — using defaults")
-                self._providers = self._build_providers(DEFAULT_PROVIDERS)
-                source = "defaults (config load failed)"
+                log(f"Failed to load {self._config_path}: {e} — falling back to auto-detect")
+                self._providers = self._build_providers(_auto_detect_entries())
+                self._auto_detected = True
+                source = "auto-detect (config load failed)"
         else:
-            self._providers = self._build_providers(DEFAULT_PROVIDERS)
-            source = "defaults (no config file)"
+            self._providers = self._build_providers(_auto_detect_entries())
+            self._auto_detected = True
+            source = "auto-detect (no user config file)"
 
         log(f"Loaded {len(self._providers)} providers from {source}")
 
@@ -120,7 +104,7 @@ class ProviderRegistry:
 
     def _check_reload(self):
         """Reload config if file mtime changed (cheap stat check)."""
-        if self._from_env or not self._config_path:
+        if self._auto_detected or not self._config_path:
             return
         if not cache_still_valid(self._config_path, self._config_mtime):
             log("Config changed, reloading providers")
@@ -153,13 +137,10 @@ class ProviderRegistry:
     def config_source(self):
         if self._config_path and self._config_path.exists():
             return str(self._config_path)
-        return "defaults"
+        return "auto-detect"
 
     def get_config_sources(self):
         """Return source metadata for providers config."""
-        if self._from_env:
-            raw = os.environ.get("PIVOT_WEB_SEARCH_PROVIDERS", "")
-            return {"source": "env", "env_var": "PIVOT_WEB_SEARCH_PROVIDERS", "value": raw}
         if self._config_path and self._config_path.exists():
             return {"source": "yaml", "path": str(self._config_path)}
-        return {"source": "default"}
+        return {"source": "auto-detect"}

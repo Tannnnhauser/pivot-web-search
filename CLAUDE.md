@@ -12,7 +12,8 @@ Users install this plugin at different scopes. All design and implementation dec
 
 Implications:
 - File paths must use `${CLAUDE_PLUGIN_ROOT}` — never assume a fixed install location
-- Config/cache files go to `~/.cache/pivot-web-search/` (user-global), not relative to the plugin directory
+- Runtime cache (quota, proxy hints, debug logs) goes to `~/.cache/pivot-web-search/` (user-global)
+- User-editable advanced YAML config goes to `~/.pivot-web-search/` (`providers.yaml`, `proxies.yaml`); templates live at `examples/` in this repo
 - Hooks (PreToolUse, SessionStart) apply at whatever scope the plugin is enabled — they affect all sessions in that scope
 - Environment variables from `userConfig` are injected by Claude Code at runtime, not read from disk
 - The plugin must work correctly whether it's the only plugin installed or one of many
@@ -31,17 +32,20 @@ Implications:
 
 ## Key Features
 
+- **Auto-detect providers**: A provider is enabled iff its API key is present (via `/plugin` UI or shell env). DDG is always on. For advanced overrides, drop a YAML at `~/.pivot-web-search/providers.yaml`.
 - **Quota-aware scheduling**: Providers sorted by API usage (lowest first), exhausted providers skipped. Quota persisted to `~/.cache/pivot-web-search/quota.json`.
 - **Smart defaults**: Time-sensitive queries auto-get recency filter; news-related queries auto-enable news mode. Explicit parameters always win.
 - **Quality detection**: If a provider returns fewer than 2 results, failover continues to the next provider.
-- **JS rendering fallback**: Configure `config/fetch.yaml` with `js_renderer: playwright` or `tavily` to handle JavaScript-rendered SPAs. Playwright requires `uv sync --extra browser`.
+- **JS rendering fallback**: Bundled `config/fetch.yaml` selects `js_renderer: playwright` or `tavily` for JavaScript-rendered SPAs. Playwright requires `uv sync --extra browser`.
 - **Brave LLM Context**: WebSearch with `include_content=true` uses Brave's LLM Context API for search+content in one call with token budget control.
+- **Proxy direct fallback**: When `Proxy URLs` (UI) is set, `direct` is automatically appended as the final fallback. To force-proxy with no direct fallback, use `~/.pivot-web-search/proxies.yaml`.
 
 ## Repository Layout
 
-This is a **subdirectory-layout marketplace repo**. The plugin payload lives at `plugins/pivot-web-search/` — that's what gets copied into a user's plugin cache. Repo-root files (`tests/`, `pyproject.toml`, `docs/`, etc.) are dev-only and never reach end users.
+This is a **subdirectory-layout marketplace repo**. The plugin payload lives at `plugins/pivot-web-search/` — that's what gets copied into a user's plugin cache. Repo-root files (`tests/`, `pyproject.toml`, `docs/`, `examples/`, etc.) are dev-only and never reach end users.
 
-- `plugins/pivot-web-search/` — `${CLAUDE_PLUGIN_ROOT}` at install time. Contains `.claude-plugin/plugin.json`, `.mcp.json`, `hooks/`, `skills/`, `scripts/`, `config/`, `pivot_web_search_mcp/`, `pyproject.toml`, `uv.lock`.
+- `plugins/pivot-web-search/` — `${CLAUDE_PLUGIN_ROOT}` at install time. Contains `.claude-plugin/plugin.json`, `.mcp.json`, `hooks/`, `skills/`, `scripts/`, `config/fetch.yaml`, `pivot_web_search_mcp/`, `pyproject.toml`, `uv.lock`.
+- `examples/` — YAML templates (`providers.yaml`, `proxies.yaml`) users copy to `~/.pivot-web-search/` for advanced configuration.
 - Repo root — workspace shell `pyproject.toml` (uv workspace, dev deps, lint/test config), `tests/`, marketplace manifest at `.claude-plugin/marketplace.json`.
 
 Tests run from the repo root via the workspace; `from pivot_web_search_mcp import ...` resolves through the workspace member install.
@@ -50,7 +54,7 @@ Tests run from the repo root via the workspace; `from pivot_web_search_mcp impor
 
 ```sh
 uv sync                         # installs workspace + dev deps
-pytest -m "not integration"     # 306 offline tests (~5s)
+pytest -m "not integration"     # 308 offline tests (~5s)
 pytest                          # all tests including live API integration
 ```
 

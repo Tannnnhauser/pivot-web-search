@@ -154,7 +154,7 @@ class TestWebSearchConfig:
         assert "proxies" in sources
         assert "fetch" in sources
         assert "source" in sources["providers"]
-        assert sources["providers"]["source"] in ("env", "yaml", "default")
+        assert sources["providers"]["source"] in ("yaml", "auto-detect")
 
 
 class TestStructuredErrors:

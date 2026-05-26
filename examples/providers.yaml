@@ -1,4 +1,8 @@
-# Pivot Web Search — Provider Configuration
+# Template: copy to ~/.pivot-web-search/providers.yaml to take over provider config.
+#
+# When this file exists, the plugin uses it exclusively — auto-detection
+# from API keys is bypassed entirely. List every provider you want enabled
+# here, including DDG.
 #
 # Providers are tried by priority (lower number = tried first).
 # Same-priority providers are hedged (queried concurrently, first quality result wins).

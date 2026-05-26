@@ -4,56 +4,66 @@
 from pivot_web_search_mcp import config, providers
 
 
-class TestProviderRegistryFromEnv:
-    def test_comma_parsing(self, monkeypatch):
-        monkeypatch.setenv("PIVOT_WEB_SEARCH_PROVIDERS", "ddg,tavily,brave")
-        reg = providers.ProviderRegistry()
-        reg.load()
-        names = {p.name for p in reg.get_ordered()}
-        assert names == {"ddg", "tavily", "brave"}
+def _clear_api_keys(monkeypatch):
+    for var in (
+        "TAVILY_API_KEY", "PIVOT_USERCONFIG_TAVILY_API_KEY",
+        "BRAVE_API_KEY", "PIVOT_USERCONFIG_BRAVE_API_KEY",
+        "GEMINI_SEARCH_API_KEY", "PIVOT_USERCONFIG_GEMINI_SEARCH_API_KEY",
+        "GOOGLE_STUDIO_API_KEY", "PIVOT_USERCONFIG_GOOGLE_STUDIO_API_KEY",
+    ):
+        monkeypatch.delenv(var, raising=False)
 
-    def test_smart_defaults_applied_from_env(self, monkeypatch):
-        monkeypatch.setenv("PIVOT_WEB_SEARCH_PROVIDERS", "ddg,tavily,brave,gemini")
+
+class TestProviderRegistryAutoDetect:
+    def test_ddg_always_enabled(self, monkeypatch):
+        _clear_api_keys(monkeypatch)
         reg = providers.ProviderRegistry()
-        reg.load()
+        reg.load(config_path="/nonexistent/path.yaml")
+        names = {p.name for p in reg.get_all()}
+        assert names == {"ddg"}
+
+    def test_enables_provider_when_key_present(self, monkeypatch):
+        _clear_api_keys(monkeypatch)
+        monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+        reg = providers.ProviderRegistry()
+        reg.load(config_path="/nonexistent/path.yaml")
+        names = {p.name for p in reg.get_all()}
+        assert names == {"ddg", "tavily"}
+
+    def test_userconfig_prefix_also_enables(self, monkeypatch):
+        _clear_api_keys(monkeypatch)
+        monkeypatch.setenv("PIVOT_USERCONFIG_BRAVE_API_KEY", "test-key")
+        reg = providers.ProviderRegistry()
+        reg.load(config_path="/nonexistent/path.yaml")
+        names = {p.name for p in reg.get_all()}
+        assert names == {"ddg", "brave"}
+
+    def test_gemini_fallback_key_also_enables(self, monkeypatch):
+        _clear_api_keys(monkeypatch)
+        monkeypatch.setenv("GOOGLE_STUDIO_API_KEY", "test-key")
+        reg = providers.ProviderRegistry()
+        reg.load(config_path="/nonexistent/path.yaml")
+        names = {p.name for p in reg.get_all()}
+        assert names == {"ddg", "gemini"}
+
+    def test_smart_defaults_applied(self, monkeypatch):
+        _clear_api_keys(monkeypatch)
+        monkeypatch.setenv("TAVILY_API_KEY", "k")
+        monkeypatch.setenv("BRAVE_API_KEY", "k")
+        monkeypatch.setenv("GEMINI_SEARCH_API_KEY", "k")
+        reg = providers.ProviderRegistry()
+        reg.load(config_path="/nonexistent/path.yaml")
         by_name = {p.name: p.effective_priority for p in reg.get_all()}
         assert by_name["tavily"] == 20
         assert by_name["brave"] == 20
         assert by_name["gemini"] == 20
         assert by_name["ddg"] == 90
-        ordered = reg.get_ordered()
-        assert ordered[-1].name == "ddg"
-
-    def test_empty_string_ignored(self, monkeypatch):
-        monkeypatch.setenv("PIVOT_WEB_SEARCH_PROVIDERS", "")
-        reg = providers.ProviderRegistry()
-        reg.load()
-        assert len(reg.get_all()) > 0  # falls through to defaults
-
-    def test_unknown_type_skipped(self, monkeypatch):
-        monkeypatch.setenv("PIVOT_WEB_SEARCH_PROVIDERS", "ddg,nonexistent")
-        reg = providers.ProviderRegistry()
-        reg.load()
-        names = [p.name for p in reg.get_all()]
-        assert "ddg" in names
-        assert "nonexistent" not in names
-
-
-class TestProviderRegistryFromDefaults:
-    def test_default_providers_loaded(self, monkeypatch):
-        monkeypatch.delenv("PIVOT_WEB_SEARCH_PROVIDERS", raising=False)
-        reg = providers.ProviderRegistry()
-        reg.load(config_path="/nonexistent/path.yaml")
-        names = [p.name for p in reg.get_all()]
-        assert "ddg" in names
-        assert "tavily" in names
-        assert "brave" in names
-        assert "gemini" in names
 
 
 class TestProviderRegistryFromYaml:
-    def test_yaml_loading(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("PIVOT_WEB_SEARCH_PROVIDERS", raising=False)
+    def test_yaml_overrides_auto_detect(self, monkeypatch, tmp_path):
+        # Even with an API key set, an explicit YAML takes over completely.
+        monkeypatch.setenv("TAVILY_API_KEY", "k")
         yaml_file = tmp_path / "providers.yaml"
         yaml_file.write_text(
             "providers:\n"
@@ -69,28 +79,53 @@ class TestProviderRegistryFromYaml:
 
 
 class TestLoadProxies:
-    def test_from_env(self, monkeypatch):
-        monkeypatch.setenv("PIVOT_WEB_SEARCH_PROXIES", "direct,http://myproxy:8080")
-        result = config.load_proxies()
-        assert result == [None, "http://myproxy:8080"]
+    def setup_method(self):
+        # Cache is module-global and bleeds across tests since the cache key
+        # ignores path identity — clear it explicitly for each test.
+        config._proxies_list = None
+        config._proxies_mtime = 0
 
-    def test_direct_maps_to_none(self, monkeypatch):
+    def test_env_appends_direct(self, monkeypatch):
+        monkeypatch.setenv("PIVOT_WEB_SEARCH_PROXIES", "http://myproxy:8080")
+        result = config.load_proxies(config_path="/nonexistent.yaml")
+        assert result == ["http://myproxy:8080", None]
+
+    def test_env_explicit_direct_still_appended(self, monkeypatch):
+        # We don't try to detect duplicates — direct is always appended.
+        monkeypatch.setenv("PIVOT_WEB_SEARCH_PROXIES", "direct,http://myproxy:8080")
+        result = config.load_proxies(config_path="/nonexistent.yaml")
+        assert result == [None, "http://myproxy:8080", None]
+
+    def test_env_only_direct(self, monkeypatch):
         monkeypatch.setenv("PIVOT_WEB_SEARCH_PROXIES", "direct")
-        result = config.load_proxies()
-        assert result == [None]
+        result = config.load_proxies(config_path="/nonexistent.yaml")
+        assert result == [None, None]
 
     def test_trailing_comma_ignored(self, monkeypatch):
-        monkeypatch.setenv("PIVOT_WEB_SEARCH_PROXIES", "direct,")
-        result = config.load_proxies()
-        assert result == [None]
+        monkeypatch.setenv("PIVOT_WEB_SEARCH_PROXIES", "http://p:80,")
+        result = config.load_proxies(config_path="/nonexistent.yaml")
+        assert result == ["http://p:80", None]
 
     def test_spaces_stripped(self, monkeypatch):
-        monkeypatch.setenv("PIVOT_WEB_SEARCH_PROXIES", " direct , http://p:80 ")
-        result = config.load_proxies()
-        assert result == [None, "http://p:80"]
+        monkeypatch.setenv("PIVOT_WEB_SEARCH_PROXIES", " http://p:80 , http://q:80 ")
+        result = config.load_proxies(config_path="/nonexistent.yaml")
+        assert result == ["http://p:80", "http://q:80", None]
 
-    def test_defaults_when_no_env(self, monkeypatch):
+    def test_default_when_no_env_or_yaml(self, monkeypatch):
         monkeypatch.delenv("PIVOT_WEB_SEARCH_PROXIES", raising=False)
         result = config.load_proxies(config_path="/nonexistent.yaml")
-        assert len(result) > 0
-        assert None in result  # direct is always included in defaults
+        assert result == [None]
+
+    def test_yaml_overrides_env_and_respects_user_list(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("PIVOT_WEB_SEARCH_PROXIES", "http://envproxy:8080")
+        yaml_file = tmp_path / "proxies.yaml"
+        yaml_file.write_text(
+            "proxies:\n"
+            "  - name: only\n"
+            "    url: http://yamlproxy:9090\n"
+            "    enabled: true\n"
+            "    priority: 1\n"
+        )
+        result = config.load_proxies(config_path=str(yaml_file))
+        # YAML wins; direct is NOT auto-appended (escape hatch for forced-proxy).
+        assert result == ["http://yamlproxy:9090"]
