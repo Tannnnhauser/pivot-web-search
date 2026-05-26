@@ -28,6 +28,10 @@ dev = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = ["integration: tests requiring real API keys or network access"]
+filterwarnings = [
+    # opentelemetry (transitive) uses a stdlib API that 3.12+ marks deprecated.
+    "ignore:SelectableGroups dict interface is deprecated:DeprecationWarning",
+]
 
 [tool.ruff]
 target-version = "py310"
