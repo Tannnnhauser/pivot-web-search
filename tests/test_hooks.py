@@ -31,16 +31,25 @@ def _run_hook(tool_name):
     return result
 
 
+def _assert_blocks(result, tool_name):
+    """Assert the hook emitted a structured PreToolUse deny for tool_name."""
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    payload = json.loads(result.stdout)
+    hook_output = payload["hookSpecificOutput"]
+    assert hook_output["hookEventName"] == "PreToolUse"
+    assert hook_output["permissionDecision"] == "deny"
+    reason = hook_output["permissionDecisionReason"]
+    assert "BLOCKED" in reason
+    assert tool_name in reason
+    assert "mcp__pivot-web-search__" in reason
+
+
 class TestPreToolUseHook:
     def test_blocks_websearch(self):
-        result = _run_hook("WebSearch")
-        assert result.returncode == 2
-        assert "BLOCKED" in result.stdout
+        _assert_blocks(_run_hook("WebSearch"), "WebSearch")
 
     def test_blocks_webfetch(self):
-        result = _run_hook("WebFetch")
-        assert result.returncode == 2
-        assert "BLOCKED" in result.stdout
+        _assert_blocks(_run_hook("WebFetch"), "WebFetch")
 
     def test_allows_bash(self):
         result = _run_hook("Bash")

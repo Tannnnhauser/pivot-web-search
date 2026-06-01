@@ -2,9 +2,11 @@
 """PreToolUse hook: block built-in WebSearch/WebFetch, redirect to MCP tools.
 
 Fail-open: on any parse error or unexpected input format, exits 0 (allow).
-Exit codes:
-  0 = allow (tool is not WebSearch/WebFetch, or parse error)
-  2 = block with reason JSON on stdout
+
+Uses the structured PreToolUse hook response (exit 0, JSON on stdout) so the
+deny reason is shown cleanly to the user and the model. Exiting non-zero
+without anything on stderr is reported by Claude Code as a hook crash
+("hook error: No stderr output") rather than a clean tool block.
 """
 import json
 import sys
@@ -20,8 +22,14 @@ def main():
                 "Use the Pivot Web Search MCP server tools instead "
                 "(mcp__pivot-web-search__WebSearch or mcp__pivot-web-search__WebFetch)."
             )
-            print(json.dumps({"reason": reason}))
-            sys.exit(2)
+            print(json.dumps({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                }
+            }))
+            sys.exit(0)
     except Exception:
         pass
     sys.exit(0)
