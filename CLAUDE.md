@@ -20,7 +20,7 @@ Implications:
 
 ## Tool Usage
 
-- **NEVER call the built-in WebSearch or WebFetch tools.** They are blocked by this plugin's PreToolUse hook and will fail with exit code 2.
+- **NEVER call the built-in WebSearch or WebFetch tools.** They are denied by this plugin's PreToolUse hook with a deny reason pointing to the MCP equivalents.
 - Use the MCP server tools instead: `mcp__pivot-web-search__WebSearch` and `mcp__pivot-web-search__WebFetch`.
 - These are available to all agent types including Explore and Plan subagents.
 
