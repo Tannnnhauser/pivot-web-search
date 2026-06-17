@@ -4,8 +4,7 @@
     "name": "Tannnnhauser"
   },
   "metadata": {
-    "description": "Pivot Web Search — a resilient, multi-provider web search and content extraction plugin for Claude Code on Amazon Bedrock and other API providers.",
-    "version": "1.0.1"
+    "description": "Pivot Web Search — a resilient, multi-provider web search and content extraction plugin for Claude Code on Amazon Bedrock and other API providers."
   },
   "plugins": [
     {

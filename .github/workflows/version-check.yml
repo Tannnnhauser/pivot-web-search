@@ -38,27 +38,8 @@ jobs:
           echo "Head version: $head_version"
 
           if [ "$base_version" = "$head_version" ]; then
-            echo "::error file=$PLUGIN_JSON::Plugin files changed but version is still $head_version. Bump $PLUGIN_JSON version (and the matching fields in .claude-plugin/marketplace.json and $PLUGIN_DIR/pyproject.toml) so /plugin update picks up the change."
+            echo "::error file=$PLUGIN_JSON::Plugin files changed but version is still $head_version. Bump $PLUGIN_JSON version so /plugin update picks up the change."
             exit 1
           fi
 
-          # Sanity-check that the marketplace and pyproject versions match plugin.json,
-          # so all three stay in lockstep.
-          marketplace_version=$(jq -r '.metadata.version' .claude-plugin/marketplace.json)
-          pyproject_version=$(grep -E '^version = ' "$PLUGIN_DIR/pyproject.toml" | head -1 | sed -E 's/version = "(.*)"/\1/')
-
-          echo "Marketplace version: $marketplace_version"
-          echo "Pyproject version: $pyproject_version"
-
-          mismatch=0
-          if [ "$marketplace_version" != "$head_version" ]; then
-            echo "::error file=.claude-plugin/marketplace.json::marketplace.json version ($marketplace_version) does not match plugin.json version ($head_version)."
-            mismatch=1
-          fi
-          if [ "$pyproject_version" != "$head_version" ]; then
-            echo "::error file=$PLUGIN_DIR/pyproject.toml::pyproject.toml version ($pyproject_version) does not match plugin.json version ($head_version)."
-            mismatch=1
-          fi
-          [ "$mismatch" -eq 0 ]
-
-          echo "Version bumped: $base_version -> $head_version (all three files in sync)"
+          echo "Version bumped: $base_version -> $head_version"
