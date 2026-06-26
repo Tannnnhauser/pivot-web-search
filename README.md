@@ -139,19 +139,29 @@ uv sync           # installs all deps in a managed venv
 # or: pip install -e ".[dev]"
 ```
 
-Then register the server with Claude Code:
+To launch the server against your working copy, point your `.mcp.json` at the local directory:
 
-```sh
-claude mcp add pivot-web-search \
-  "uv run --directory /path/to/pivot-web-search/plugins/pivot-web-search python -m pivot_web_search_mcp"
-```
-
-Set API keys as environment variables:
-
-```sh
-export TAVILY_API_KEY=tvly-...
-export BRAVE_API_KEY=BSA...
-export GEMINI_SEARCH_API_KEY=AI...   # or GOOGLE_STUDIO_API_KEY
+```json
+{
+  "mcpServers": {
+    "pivot-web-search": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "/path/to/pivot-web-search/plugins/pivot-web-search",
+        "python",
+        "-m",
+        "pivot_web_search_mcp"
+      ],
+      "env": {
+        "TAVILY_API_KEY": "tvly-...",
+        "BRAVE_API_KEY": "BSA...",
+        "GEMINI_SEARCH_API_KEY": "AI..."
+      }
+    }
+  }
+}
 ```
 
 ### Uninstall
