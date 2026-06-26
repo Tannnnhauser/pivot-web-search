@@ -83,11 +83,7 @@ After installing, ask Claude Code to run `WebSearchConfig` with action `status`.
 
 ### Manual install
 
-Two ways to run the MCP server without going through the plugin marketplace.
-
-#### Option 1: One-line remote launch via `uvx` (recommended)
-
-Requires only **[uv](https://docs.astral.sh/uv/)** — no clone, no venv, no `pip install`. `uvx` fetches the package directly from GitHub and runs it in a managed cache.
+For users who want to skip the plugin marketplace entirely, run the MCP server remotely via `uvx`. Requires only **[uv](https://docs.astral.sh/uv/)** — no clone, no venv, no `pip install`. `uvx` fetches the package directly from GitHub and runs it in a managed cache.
 
 Add this to your `.mcp.json` (works in Claude Code, Claude Desktop, Cursor, and any MCP-aware host):
 
@@ -126,43 +122,7 @@ First run takes a few seconds (clone + dependency resolve); subsequent runs reus
 git+https://github.com/Tannnnhauser/pivot-web-search.git@v1.0.1#subdirectory=plugins/pivot-web-search
 ```
 
-For advanced provider/proxy config, drop YAML files at `~/.pivot-web-search/providers.yaml` and `~/.pivot-web-search/proxies.yaml` (templates in [`examples/`](examples/)) — they apply to any launch mode, including `uvx`.
-
-#### Option 2: Clone and run with `uv run`
-
-Use this if you want to hack on the source.
-
-```sh
-git clone https://github.com/Tannnnhauser/pivot-web-search.git
-cd pivot-web-search
-uv sync           # installs all deps in a managed venv
-# or: pip install -e ".[dev]"
-```
-
-To launch the server against your working copy, point your `.mcp.json` at the local directory:
-
-```json
-{
-  "mcpServers": {
-    "pivot-web-search": {
-      "command": "uv",
-      "args": [
-        "run",
-        "--directory",
-        "/path/to/pivot-web-search/plugins/pivot-web-search",
-        "python",
-        "-m",
-        "pivot_web_search_mcp"
-      ],
-      "env": {
-        "TAVILY_API_KEY": "tvly-...",
-        "BRAVE_API_KEY": "BSA...",
-        "GEMINI_SEARCH_API_KEY": "AI..."
-      }
-    }
-  }
-}
-```
+For advanced provider/proxy config, drop YAML files at `~/.pivot-web-search/providers.yaml` and `~/.pivot-web-search/proxies.yaml` (templates in [`examples/`](examples/)) — they apply to `uvx` launches the same way they apply to plugin installs.
 
 ### Uninstall
 
@@ -174,9 +134,9 @@ claude plugin uninstall pivot-web-search
 
 ```sh
 claude plugin update pivot-web-search
-# Or for manual installs:
-git pull && uv sync
-# or: pip install -e ".[dev]"
+# For uvx-based installs: refresh the cache, or pin a new @vX.Y.Z tag
+uvx --refresh --from "git+https://github.com/Tannnnhauser/pivot-web-search.git#subdirectory=plugins/pivot-web-search" \
+    python -m pivot_web_search_mcp
 ```
 
 ### Local development
