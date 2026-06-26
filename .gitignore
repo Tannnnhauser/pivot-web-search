@@ -11,5 +11,6 @@ build/
 .idea/
 .claude/settings.local.json
 .claude/worktrees/
+.claude/commands/
 CLAUDE.local.md
 docs/
