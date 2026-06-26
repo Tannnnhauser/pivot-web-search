@@ -81,6 +81,19 @@ providers:
   #   # priority: 10 (smart default)
   #   # affinity: general
 
+  # ─── LLM Search via local OpenAI-compatible gateway ──────────────────
+  # Same chat_completions format, but pointed at a localhost proxy. Useful
+  # for routing through Ollama, vLLM, LiteLLM, or an internal corporate
+  # AI gateway that exposes /v1/chat/completions. Omit api_key_env if the
+  # gateway needs no auth.
+  # - name: sonar-pro-local
+  #   type: llm_search
+  #   api_format: chat_completions
+  #   endpoint: "http://localhost:9988/openai/v1/chat/completions"
+  #   model: sonar-pro
+  #   api_key_env: LOCAL_GATEWAY_API_KEY
+  #   timeout: 30
+
   # ─── LLM Search (responses format — OpenAI Responses API) ───────────
   # - name: gpt-web-search
   #   type: llm_search

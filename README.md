@@ -83,7 +83,54 @@ After installing, ask Claude Code to run `WebSearchConfig` with action `status`.
 
 ### Manual install
 
-Requires **[uv](https://docs.astral.sh/uv/)** (or Python 3.10+ with pip).
+Two ways to run the MCP server without going through the plugin marketplace.
+
+#### Option 1: One-line remote launch via `uvx` (recommended)
+
+Requires only **[uv](https://docs.astral.sh/uv/)** — no clone, no venv, no `pip install`. `uvx` fetches the package directly from GitHub and runs it in a managed cache.
+
+Add this to your `.mcp.json` (works in Claude Code, Claude Desktop, Cursor, and any MCP-aware host):
+
+```json
+{
+  "mcpServers": {
+    "pivot-web-search": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/Tannnnhauser/pivot-web-search.git#subdirectory=plugins/pivot-web-search",
+        "python",
+        "-m",
+        "pivot_web_search_mcp"
+      ],
+      "env": {
+        "TAVILY_API_KEY": "tvly-...",
+        "BRAVE_API_KEY": "BSA...",
+        "GEMINI_SEARCH_API_KEY": "AI..."
+      }
+    }
+  }
+}
+```
+
+Or one-shot from the shell (e.g. for debugging):
+
+```sh
+uvx --from "git+https://github.com/Tannnnhauser/pivot-web-search.git#subdirectory=plugins/pivot-web-search" \
+    python -m pivot_web_search_mcp
+```
+
+First run takes a few seconds (clone + dependency resolve); subsequent runs reuse the uvx cache. Pin a specific version with `@v1.0.1`:
+
+```
+git+https://github.com/Tannnnhauser/pivot-web-search.git@v1.0.1#subdirectory=plugins/pivot-web-search
+```
+
+For advanced provider/proxy config, drop YAML files at `~/.pivot-web-search/providers.yaml` and `~/.pivot-web-search/proxies.yaml` (templates in [`examples/`](examples/)) — they apply to any launch mode, including `uvx`.
+
+#### Option 2: Clone and run with `uv run`
+
+Use this if you want to hack on the source.
 
 ```sh
 git clone https://github.com/Tannnnhauser/pivot-web-search.git
@@ -92,18 +139,19 @@ uv sync           # installs all deps in a managed venv
 # or: pip install -e ".[dev]"
 ```
 
-When running manually, set API keys as environment variables:
+Then register the server with Claude Code:
+
+```sh
+claude mcp add pivot-web-search \
+  "uv run --directory /path/to/pivot-web-search/plugins/pivot-web-search python -m pivot_web_search_mcp"
+```
+
+Set API keys as environment variables:
 
 ```sh
 export TAVILY_API_KEY=tvly-...
 export BRAVE_API_KEY=BSA...
 export GEMINI_SEARCH_API_KEY=AI...   # or GOOGLE_STUDIO_API_KEY
-```
-
-After manual installation, set API keys via env vars (above) and — if you need advanced provider/proxy config — create the YAML files at `~/.pivot-web-search/providers.yaml` and `~/.pivot-web-search/proxies.yaml` (templates in [`examples/`](examples/)). To register the server with Claude Code, add it to your `.mcp.json` or run:
-
-```sh
-claude mcp add pivot-web-search "uv run --directory /path/to/pivot-web-search/plugins/pivot-web-search python -m pivot_web_search_mcp"
 ```
 
 ### Uninstall
