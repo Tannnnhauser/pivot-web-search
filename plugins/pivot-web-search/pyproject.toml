@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pivot-web-search-mcp"
-version = "1.0.1"
+version = "1.0.2"
 description = "Pivot Web Search — Claude Code plugin: multi-provider web search with failover"
 license = "Apache-2.0"
 requires-python = ">=3.10"
@@ -33,6 +33,9 @@ dependencies = [
 browser = [
     "playwright>=1.40,<2.0",
 ]
+
+[project.scripts]
+pivot-web-search-mcp = "pivot_web_search_mcp.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/Tannnnhauser/pivot-web-search"

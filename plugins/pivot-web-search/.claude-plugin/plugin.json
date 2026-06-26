@@ -1,6 +1,6 @@
 {
   "name": "pivot-web-search",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "A resilient, multi-provider web search and content extraction plugin for Claude Code on Amazon Bedrock and other API providers.",
   "author": { "name": "Tannnnhauser" },
   "keywords": ["search", "web", "fetch", "extract", "mcp"],

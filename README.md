@@ -93,11 +93,7 @@ Add this to your `.mcp.json` (works in Claude Code, Claude Desktop, Cursor, and 
     "pivot-web-search": {
       "command": "uvx",
       "args": [
-        "--from",
-        "git+https://github.com/Tannnnhauser/pivot-web-search.git#subdirectory=plugins/pivot-web-search",
-        "python",
-        "-m",
-        "pivot_web_search_mcp"
+        "git+https://github.com/Tannnnhauser/pivot-web-search.git#subdirectory=plugins/pivot-web-search"
       ],
       "env": {
         "TAVILY_API_KEY": "tvly-...",
@@ -112,14 +108,13 @@ Add this to your `.mcp.json` (works in Claude Code, Claude Desktop, Cursor, and 
 Or one-shot from the shell (e.g. for debugging):
 
 ```sh
-uvx --from "git+https://github.com/Tannnnhauser/pivot-web-search.git#subdirectory=plugins/pivot-web-search" \
-    python -m pivot_web_search_mcp
+uvx "git+https://github.com/Tannnnhauser/pivot-web-search.git#subdirectory=plugins/pivot-web-search"
 ```
 
-First run takes a few seconds (clone + dependency resolve); subsequent runs reuse the uvx cache. Pin a specific version with `@v1.0.1`:
+First run takes a few seconds (clone + dependency resolve); subsequent runs reuse the uvx cache. Pin a specific version with `@v1.0.2`:
 
 ```
-git+https://github.com/Tannnnhauser/pivot-web-search.git@v1.0.1#subdirectory=plugins/pivot-web-search
+git+https://github.com/Tannnnhauser/pivot-web-search.git@v1.0.2#subdirectory=plugins/pivot-web-search
 ```
 
 For advanced provider/proxy config, drop YAML files at `~/.pivot-web-search/providers.yaml` and `~/.pivot-web-search/proxies.yaml` (templates in [`examples/`](examples/)) — they apply to `uvx` launches the same way they apply to plugin installs.
@@ -135,8 +130,7 @@ claude plugin uninstall pivot-web-search
 ```sh
 claude plugin update pivot-web-search
 # For uvx-based installs: refresh the cache, or pin a new @vX.Y.Z tag
-uvx --refresh --from "git+https://github.com/Tannnnhauser/pivot-web-search.git#subdirectory=plugins/pivot-web-search" \
-    python -m pivot_web_search_mcp
+uvx --refresh "git+https://github.com/Tannnnhauser/pivot-web-search.git#subdirectory=plugins/pivot-web-search"
 ```
 
 ### Local development
