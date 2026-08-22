@@ -39,6 +39,25 @@ Optional host adapters live outside the Plugin payload. In particular,
 Bundle that uses DSH's public plugin APIs. Never require changes to a DSH source
 checkout to adopt Pivot.
 
+### DeepSeek Harness Integration Contract
+
+- The adapter may use only DSH's published Profile Bundle, `ctx.web`, and
+  `ctx.subprocess` contracts. Do not import DSH source paths or add DSH runtime
+  packages as dependencies of `pivot-web-search-dsh`.
+- The Bundle registers provider ID `pivot`, selects it for both search and
+  fetch, and must explicitly set the existing `tool-web` entry to
+  `disabled: false`. DSH's shipped web profile disables that entry.
+- The model-facing API remains DSH's native `web_search` and `web_fetch`.
+  Do not register duplicate Pivot-specific model tools.
+- `pivot-web-search-bridge` is a one-shot, versioned JSON protocol over
+  stdin/stdout. Keep stdout machine-pure, validate both request and response
+  shapes, sanitize errors, honor cancellation, and bound collected output.
+- DSH-specific composition belongs under `integrations/deepseek-harness/`.
+  DSH names, defaults, and policy must not leak into the shared Python service
+  layer or machine bridge.
+- Acceptance criterion: a fresh DSH checkout/profile can install the external
+  Bundle while the DSH source worktree remains unchanged.
+
 ## Key Features
 
 - **Auto-detect providers**: A provider is enabled iff its API key is present (via `/plugin` UI or shell env). DDG is always on. For advanced overrides, drop a YAML at `~/.pivot-web-search/providers.yaml`.
@@ -64,10 +83,20 @@ Tests run from the repo root via the workspace; `from pivot_web_search_mcp impor
 
 ```sh
 uv sync                         # installs workspace + dev deps
-pytest -m "not integration"     # 355 offline tests
-pytest                          # all tests including live API integration
+uv run pytest -m "not integration" -q  # 355 offline tests
+uv run pytest -m integration -vv        # 7 live network/API tests
+uv run pytest                           # all 362 Python tests
 npm --prefix integrations/deepseek-harness test
+npm --prefix integrations/deepseek-harness pack --dry-run
 ```
+
+Changes to the DSH Bundle require more than unit tests. Use a fresh temporary
+`DSH_HOME`, install the local Bundle with `dsh plugin --profile web add`, and
+inspect `dsh --profile web --dump-config`. Assert that `pivot` owns both web
+providers, `tool-web` is enabled, and `pivot-web-search-provider` is present.
+Then exercise real DSH `web_search` and `web_fetch` calls through `ctx.tools` so
+the tool registry, `ctx.web`, `ctx.subprocess`, adapter, bridge, and Python
+services are all covered. Do not clean or reset a neighboring DSH checkout.
 
 ## Development Rules
 

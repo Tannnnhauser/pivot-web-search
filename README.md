@@ -8,7 +8,7 @@
 
 ## What Is This?
 
-Pivot Web Search is first and foremost a **Claude Code Plugin**. It gives Claude Code users on **Amazon Bedrock** (or other API providers) a fully self-hosted, multi-provider search failover engine and local content extraction without an Anthropic API dependency. MCP is the Plugin's runtime interface, not a replacement for the Plugin product boundary.
+Pivot Web Search is first and foremost a **Claude Code Plugin**. It gives Claude Code users on **Amazon Bedrock** (or other API providers) a fully self-hosted, multi-provider search failover engine and local content extraction without an Anthropic API dependency. MCP is the Plugin's runtime interface, not a replacement for the Plugin product boundary. Optional integrations for other hosts are installed alongside those hosts through their public extension APIs; adopting Pivot never requires patching a host's source code.
 
 ## Key Features
 
@@ -111,10 +111,10 @@ Or one-shot from the shell (e.g. for debugging):
 uvx "git+https://github.com/Tannnnhauser/pivot-web-search.git#subdirectory=plugins/pivot-web-search"
 ```
 
-First run takes a few seconds (clone + dependency resolve); subsequent runs reuse the uvx cache. Pin a specific version with `@v1.0.2`:
+First run takes a few seconds (clone + dependency resolve); subsequent runs reuse the uvx cache. Pin a specific version with `@v1.1.0`:
 
 ```
-git+https://github.com/Tannnnhauser/pivot-web-search.git@v1.0.2#subdirectory=plugins/pivot-web-search
+git+https://github.com/Tannnnhauser/pivot-web-search.git@v1.1.0#subdirectory=plugins/pivot-web-search
 ```
 
 For advanced provider/proxy config, drop YAML files at `~/.pivot-web-search/providers.yaml` and `~/.pivot-web-search/proxies.yaml` (templates in [`examples/`](examples/)) — they apply to `uvx` launches the same way they apply to plugin installs.
@@ -162,18 +162,57 @@ it must never require patching the host's source tree.
 The optional [`pivot-web-search-dsh`](integrations/deepseek-harness/) Profile
 Bundle is maintained in this repository but is not part of the Claude Plugin
 payload. It registers Pivot as DSH's existing `web_search` and `web_fetch`
-provider through DSH's published plugin interfaces:
+provider through DSH's published Profile Bundle, `ctx.web`, and
+`ctx.subprocess` interfaces. The model continues to see DSH's standard tools;
+the integration does not add a second set of Pivot-specific model tools.
+
+Install both components from a local checkout while developing:
 
 ```sh
-uv tool install 'git+https://github.com/Tannnnhauser/pivot-web-search.git#subdirectory=plugins/pivot-web-search'
+uv tool install --force ./plugins/pivot-web-search
 dsh plugin --profile web add ./integrations/deepseek-harness
 ```
 
-Once published, the second command becomes
-`dsh plugin --profile web add pivot-web-search-dsh`. No DSH source checkout,
-fork, or pull request is required. The adapter invokes the host-neutral
-`pivot-web-search-bridge` command and maps structured results into DSH's
-standard web contracts.
+For normal adoption, install the Pivot runtime from this repository and the
+published Bundle from npm:
+
+```sh
+uv tool install 'git+https://github.com/Tannnnhauser/pivot-web-search.git@v1.1.0#subdirectory=plugins/pivot-web-search'
+dsh plugin --profile web add pivot-web-search-dsh
+```
+
+Restart the DSH profile after adding or removing a Bundle. The Bundle performs
+three composition changes:
+
+- registers provider ID `pivot` for both DSH web capabilities;
+- selects `pivot` as `searchProvider` and `fetchProvider`;
+- explicitly enables DSH's existing `tool-web` entry, which the shipped web
+  profile otherwise disables.
+
+The adapter invokes the host-neutral `pivot-web-search-bridge` executable and
+maps structured results into DSH's standard web contracts. It does not import,
+copy, patch, or rebuild DSH source. No DSH checkout, fork, or pull request is
+required for adoption.
+
+Provider credentials are forwarded explicitly from the DSH process:
+`TAVILY_API_KEY`, `BRAVE_API_KEY`, `GEMINI_SEARCH_API_KEY`, and
+`GOOGLE_STUDIO_API_KEY`. DDG needs no key. Advanced provider, fetch, and proxy
+configuration continues to live under `~/.pivot-web-search/`; the optional
+`PIVOT_WEB_SEARCH_PROXIES` environment variable is also forwarded.
+
+Verify the composed profile before restarting it:
+
+```sh
+dsh --profile web --dump-config
+```
+
+The output should show `searchProvider: pivot`, `fetchProvider: pivot`, an
+enabled `tool-web` entry, and `pivot-web-search-provider`. To remove the
+integration without touching DSH source:
+
+```sh
+dsh plugin --profile web remove pivot-web-search-dsh
+```
 
 ## MCP Tool Reference
 
@@ -478,7 +517,8 @@ pyproject.toml                   Workspace shell — dev deps and lint/test conf
 ```sh
 uv sync                               # install workspace + dev dependencies
 pytest -m "not integration"           # 355 offline tests
-pytest                                # all tests including live integration (requires BRAVE/TAVILY keys)
+pytest -m integration                  # 7 live network/API tests
+pytest                                # all 362 Python tests
 npm --prefix integrations/deepseek-harness test
 ```
 
