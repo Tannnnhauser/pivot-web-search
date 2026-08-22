@@ -30,6 +30,15 @@ Implications:
 - **`mcp__pivot-web-search__WebFetch`** — Extract full page content from URLs. Uses trafilatura with Next.js/Nuxt.js SPA fallback. Configurable JS renderer fallback (Playwright or Tavily Extract) for dynamic pages. Supports batch URLs, query-aware extraction, and configurable truncation.
 - **`mcp__pivot-web-search__WebSearchConfig`** — Runtime config inspection (`status`) and hot-reload (`reload`). Status includes provider health and quota usage.
 
+The Plugin's MCP tools, the `pivot-web-search` CLI, and the non-model-visible
+`pivot-web-search-bridge` command call the same Python application services.
+The bridge is host-neutral and must not contain DSH-specific policy or naming.
+
+Optional host adapters live outside the Plugin payload. In particular,
+`integrations/deepseek-harness/` is an installable out-of-tree DSH Profile
+Bundle that uses DSH's public plugin APIs. Never require changes to a DSH source
+checkout to adopt Pivot.
+
 ## Key Features
 
 - **Auto-detect providers**: A provider is enabled iff its API key is present (via `/plugin` UI or shell env). DDG is always on. For advanced overrides, drop a YAML at `~/.pivot-web-search/providers.yaml`.
@@ -46,6 +55,7 @@ This is a **subdirectory-layout marketplace repo**. The plugin payload lives at 
 
 - `plugins/pivot-web-search/` — `${CLAUDE_PLUGIN_ROOT}` at install time. Contains `.claude-plugin/plugin.json`, `.mcp.json`, `hooks/`, `skills/`, `scripts/`, `config/fetch.yaml`, `pivot_web_search_mcp/`, `pyproject.toml`, `uv.lock`.
 - `examples/` — YAML templates (`providers.yaml`, `proxies.yaml`) users copy to `~/.pivot-web-search/` for advanced configuration.
+- `integrations/deepseek-harness/` — optional external DSH adapter package; not copied into the Claude Plugin cache.
 - Repo root — workspace shell `pyproject.toml` (uv workspace, dev deps, lint/test config), `tests/`, marketplace manifest at `.claude-plugin/marketplace.json`.
 
 Tests run from the repo root via the workspace; `from pivot_web_search_mcp import ...` resolves through the workspace member install.
@@ -54,8 +64,9 @@ Tests run from the repo root via the workspace; `from pivot_web_search_mcp impor
 
 ```sh
 uv sync                         # installs workspace + dev deps
-pytest -m "not integration"     # 308 offline tests (~5s)
+pytest -m "not integration"     # 355 offline tests
 pytest                          # all tests including live API integration
+npm --prefix integrations/deepseek-harness test
 ```
 
 ## Development Rules

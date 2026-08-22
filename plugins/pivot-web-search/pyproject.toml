@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pivot-web-search-mcp"
-version = "1.0.2"
+version = "1.1.0"
 description = "Pivot Web Search — Claude Code plugin: multi-provider web search with failover"
 license = "Apache-2.0"
 requires-python = ">=3.10"
@@ -35,6 +35,8 @@ browser = [
 ]
 
 [project.scripts]
+pivot-web-search = "pivot_web_search_mcp.cli:main"
+pivot-web-search-bridge = "pivot_web_search_mcp.machine_bridge:main"
 pivot-web-search-mcp = "pivot_web_search_mcp.__main__:main"
 
 [project.urls]

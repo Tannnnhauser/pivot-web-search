@@ -3,6 +3,7 @@
 import asyncio
 import json
 import pathlib
+import re
 import time
 import urllib.parse
 
@@ -18,6 +19,7 @@ try:
     import ssl
 
     import certifi
+
     _SSL_VERIFY = ssl.create_default_context(cafile=certifi.where())
 except ImportError:
     _SSL_VERIFY = True
@@ -30,6 +32,7 @@ except ImportError:
 def _get_proxies():
     """Get proxy list from config (hot-reloadable)."""
     from .config import load_proxies
+
     return load_proxies()
 
 
@@ -115,6 +118,25 @@ async def close_client():
         _async_client = None
 
 
+def _proxy_label(proxy):
+    """Return a credential-free proxy label suitable for diagnostics."""
+    if not proxy:
+        return "direct"
+    try:
+        parsed = urllib.parse.urlparse(proxy)
+        if not parsed.scheme or not parsed.hostname:
+            return "proxy"
+        port = f":{parsed.port}" if parsed.port is not None else ""
+        return f"{parsed.scheme}://{parsed.hostname}{port}"
+    except (TypeError, ValueError):
+        return "proxy"
+
+
+def _safe_error_text(error):
+    """Remove URL userinfo from an exception before writing it to logs."""
+    return re.sub(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/@\s]+@", r"\1", str(error))
+
+
 # ---------------------------------------------------------------------------
 # Cross-host redirect detection
 # ---------------------------------------------------------------------------
@@ -133,8 +155,7 @@ class CrossHostRedirect(Exception):
 
 async def _try_request_with_redirect(method, url, *, headers, data, timeout, proxy):
     """Single request with cross-host redirect detection and same-host follow."""
-    resp = await _do_request(method, url, headers=headers, data=data,
-                             timeout=timeout, proxy=proxy)
+    resp = await _do_request(method, url, headers=headers, data=data, timeout=timeout, proxy=proxy)
     if resp.is_redirect:
         location = resp.headers.get("location", "")
         if location:
@@ -142,8 +163,7 @@ async def _try_request_with_redirect(method, url, *, headers, data, timeout, pro
             new_host = (urllib.parse.urlparse(location).hostname or "").removeprefix("www.")
             if new_host and orig_host != new_host:
                 raise CrossHostRedirect(orig_host, new_host, location)
-            resp = await _do_request(method, location, headers=headers, data=None,
-                                    timeout=timeout, proxy=proxy)
+            resp = await _do_request(method, location, headers=headers, data=None, timeout=timeout, proxy=proxy)
     return resp
 
 
@@ -194,22 +214,22 @@ async def _open_with_fallback(method, url, *, headers=None, data=None, timeout=3
         try:
             try:
                 resp = await _try_request_with_redirect(
-                    method, url, headers=headers, data=data,
-                    timeout=timeout, proxy=proxy)
+                    method, url, headers=headers, data=data, timeout=timeout, proxy=proxy
+                )
             except httpx.HTTPStatusError as e:
                 if e.response.status_code in (429, 503) and not retried_transient:
                     retried_transient = True
                     log(f"HTTP {e.response.status_code}, retrying once after 1s backoff")
                     await asyncio.sleep(1)
                     resp = await _try_request_with_redirect(
-                        method, url, headers=headers, data=data,
-                        timeout=timeout, proxy=proxy)
-                    log(f"Connected via {proxy or 'direct'} (retry)")
+                        method, url, headers=headers, data=data, timeout=timeout, proxy=proxy
+                    )
+                    log(f"Connected via {_proxy_label(proxy)} (retry)")
                     await _record_proxy_success(host, proxy)
                     return resp
                 raise
 
-            log(f"Connected via {proxy or 'direct'}")
+            log(f"Connected via {_proxy_label(proxy)}")
             await _record_proxy_success(host, proxy)
             return resp
 
@@ -220,8 +240,8 @@ async def _open_with_fallback(method, url, *, headers=None, data=None, timeout=3
             raise
 
         except Exception as e:
-            label = proxy or "direct"
-            log(f"{label} failed: {e}")
+            label = _proxy_label(proxy)
+            log(f"{label} failed: {_safe_error_text(e)}")
             async with _proxy_cache_lock:
                 if proxy == cached and host in _proxy_cache:
                     del _proxy_cache[host]
@@ -242,14 +262,19 @@ async def _do_request(method, url, *, headers=None, data=None, timeout=30, proxy
     req_headers = dict(headers) if headers else {}
     if proxy:
         async with httpx.AsyncClient(
-            proxy=proxy, verify=_SSL_VERIFY, follow_redirects=False,
+            proxy=proxy,
+            verify=_SSL_VERIFY,
+            follow_redirects=False,
             timeout=httpx.Timeout(float(timeout), connect=10.0),
         ) as client:
             resp = await client.request(method, url, headers=req_headers, content=data)
     else:
         client = await _get_client()
         resp = await client.request(
-            method, url, headers=req_headers, content=data,
+            method,
+            url,
+            headers=req_headers,
+            content=data,
             timeout=httpx.Timeout(float(timeout), connect=10.0),
         )
     if not resp.is_redirect:

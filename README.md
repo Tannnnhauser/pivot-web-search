@@ -4,11 +4,11 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
-[![Tests: 305](https://img.shields.io/badge/tests-305%20passing-brightgreen.svg)]()
+[![Tests: 355](https://img.shields.io/badge/tests-355%20offline-brightgreen.svg)]()
 
 ## What Is This?
 
-Claude Code users on **Amazon Bedrock** (or other API providers) don't get Anthropic's built-in `WebSearch` and `WebFetch` tools. This Model Context Protocol (MCP) search server fills that gap — giving you a fully self-hosted, multi-provider search failover engine and a local content extractor, with no Anthropic API dependency.
+Pivot Web Search is first and foremost a **Claude Code Plugin**. It gives Claude Code users on **Amazon Bedrock** (or other API providers) a fully self-hosted, multi-provider search failover engine and local content extraction without an Anthropic API dependency. MCP is the Plugin's runtime interface, not a replacement for the Plugin product boundary.
 
 ## Key Features
 
@@ -139,6 +139,42 @@ uvx --refresh "git+https://github.com/Tannnnhauser/pivot-web-search.git#subdirec
 claude --plugin-dir /path/to/pivot-web-search/
 ```
 
+## CLI and Other Hosts
+
+The installed Python package also provides a human-facing CLI backed by the
+same search, fetch, and configuration services as the Plugin's MCP tools:
+
+```sh
+pivot-web-search search "latest Python release" --format json
+pivot-web-search fetch https://example.com --format md
+pivot-web-search config status
+```
+
+`extract` remains an alias for `fetch`. The CLI does not duplicate provider
+routing or content-extraction logic.
+
+Hosts that support MCP can run `pivot-web-search-mcp` directly. A host-specific
+native integration must be an installable adapter using that host's public API;
+it must never require patching the host's source tree.
+
+### DeepSeek Harness
+
+The optional [`pivot-web-search-dsh`](integrations/deepseek-harness/) Profile
+Bundle is maintained in this repository but is not part of the Claude Plugin
+payload. It registers Pivot as DSH's existing `web_search` and `web_fetch`
+provider through DSH's published plugin interfaces:
+
+```sh
+uv tool install 'git+https://github.com/Tannnnhauser/pivot-web-search.git#subdirectory=plugins/pivot-web-search'
+dsh plugin --profile web add ./integrations/deepseek-harness
+```
+
+Once published, the second command becomes
+`dsh plugin --profile web add pivot-web-search-dsh`. No DSH source checkout,
+fork, or pull request is required. The adapter invokes the host-neutral
+`pivot-web-search-bridge` command and maps structured results into DSH's
+standard web contracts.
+
 ## MCP Tool Reference
 
 When called via MCP, tools are prefixed: `mcp__pivot-web-search__WebSearch`, `mcp__pivot-web-search__WebFetch`, `mcp__pivot-web-search__WebSearchConfig`.
@@ -167,7 +203,6 @@ When called via MCP, tools are prefixed: `mcp__pivot-web-search__WebSearch`, `mc
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `url` | str / list[str] | *required* | URL(s) to extract content from. HTTP auto-upgrades to HTTPS. Supports batch mode with multiple URLs. |
-| `prompt` | str | *required* | Instruction passed alongside the extracted content. The calling AI model uses this to focus its response — no server-side filtering is performed. |
 | `query` | str | `null` | Optional query for relevance-aware extraction |
 | `max_chars` | int | `null` | Truncate output to this many characters (default: 100,000) |
 
@@ -403,8 +438,14 @@ plugins/pivot-web-search/        Plugin payload — what gets installed into the
   pyproject.toml + uv.lock       Runtime dependencies, resolved by uv at startup
   hooks/hooks.json               PreToolUse hook — blocks built-in WebSearch/WebFetch (fail-open)
                                  SessionStart hook — async health check on startup
-  pivot_web_search_mcp/          FastMCP server (stdio) — fully async, exposes 3 MCP tools
-    server.py                    Async tool handlers, failover orchestration, smart defaults
+  pivot_web_search_mcp/          Shared application services and Plugin interfaces
+    server.py                    FastMCP adapter exposing the Plugin's 3 tools
+    search_service.py            Authoritative search orchestration
+    fetch_service.py             Authoritative fetch/extraction orchestration
+    config_service.py            Status and reload operations
+    presentation.py              Markdown and JSON projections
+    cli.py                       Human-facing CLI adapter
+    machine_bridge.py            Host-neutral one-shot structured adapter API
     routing.py                   Priority-group routing, hedged execution, circuit breaker, quality gate
     quality_gate.py              3-tier quality gate (answer/URLs/keywords)
     backends.py                  Async search backends (DDG/Tavily/Brave/Gemini, httpx)
@@ -426,8 +467,9 @@ plugins/pivot-web-search/        Plugin payload — what gets installed into the
   skills/pivot-web-search/       Skill definition surfaced to Claude Code
 
 .claude-plugin/marketplace.json  Marketplace manifest pointing to ./plugins/pivot-web-search
+integrations/deepseek-harness/   Optional out-of-tree DSH Profile Bundle; never patches DSH source
 examples/                        YAML templates for ~/.pivot-web-search/ — copy and edit for advanced setups
-tests/                           308 offline tests + live integration (pytest-asyncio)
+tests/                           355 offline tests + 7 live integration tests (pytest-asyncio)
 pyproject.toml                   Workspace shell — dev deps and lint/test config (no runtime code)
 ```
 
@@ -435,8 +477,9 @@ pyproject.toml                   Workspace shell — dev deps and lint/test conf
 
 ```sh
 uv sync                               # install workspace + dev dependencies
-pytest -m "not integration"           # 308 offline tests (~5s)
+pytest -m "not integration"           # 355 offline tests
 pytest                                # all tests including live integration (requires BRAVE/TAVILY keys)
+npm --prefix integrations/deepseek-harness test
 ```
 
 ## Troubleshooting

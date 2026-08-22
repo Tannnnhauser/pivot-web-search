@@ -1,19 +1,15 @@
-"""Command-line interface for pivot-web-search.
-
-Usage:
-  python -m pivot_web_search_mcp.cli search <query> [...flags]
-  python -m pivot_web_search_mcp.cli extract <urls...>
-"""
+"""Human-facing command-line interface for Pivot Web Search."""
 
 import argparse
 import asyncio
 import json
 import sys
 
-from .extraction import extract_trafilatura
+from .config_service import ConfigService, ConfigServiceError
+from .fetch_service import FetchRequest, FetchService, FetchServiceError
 from .http_client import close_client
-from .providers import ProviderRegistry
-from .results import dedup_and_rank, to_markdown
+from .presentation import fetch_response_dict, format_fetch_markdown, format_search_markdown
+from .search_service import SearchRequest, SearchService, SearchServiceError
 
 
 def main():
@@ -21,118 +17,127 @@ def main():
 
 
 async def _async_main():
-    ap = argparse.ArgumentParser(description="Unified web search (DDG -> Tavily -> Brave -> Gemini)")
-    sub = ap.add_subparsers(dest="cmd")
+    parser = argparse.ArgumentParser(description="Unified web search (DDG -> Tavily -> Brave -> Gemini)")
+    sub = parser.add_subparsers(dest="cmd")
 
-    sp = sub.add_parser("search", help="Web search with auto-failover")
-    sp.add_argument("query", help="Search query")
-    sp.add_argument("--max-results", type=int, default=5)
-    sp.add_argument("--region", default="wt-wt", help="DDG region (cn-zh, us-en, wt-wt)")
-    sp.add_argument("--timelimit", choices=["d", "w", "m", "y"], help="Time filter")
-    sp.add_argument("--news", action="store_true", help="Search news")
-    sp.add_argument("--include-answer", action="store_true", help="Tavily AI answer")
-    sp.add_argument("--search-depth", default="basic", choices=["basic", "advanced"])
-    sp.add_argument("--topic", default="general", choices=["general", "news"])
-    sp.add_argument("--days", type=int, help="Limit news to recent N days (Tavily)")
-    sp.add_argument("--include-domains", nargs="+", help="Tavily domain filter")
-    sp.add_argument("--exclude-domains", nargs="+", help="Tavily domain exclusion")
-    sp.add_argument("--format", default="md", choices=["json", "md"])
-    sp.add_argument("--provider", default="auto",
-                    help="Provider name (auto, ddg, tavily, brave, gemini, or any name from providers.yaml)")
-    sp.add_argument("--super", action="store_true", help="Query all providers in parallel (uses quota on all)")
+    search = sub.add_parser("search", help="Web search with auto-failover")
+    search.add_argument("query", help="Search query")
+    search.add_argument("--max-results", type=int, default=5)
+    search.add_argument("--region", default="wt-wt", help="DDG region (cn-zh, us-en, wt-wt)")
+    search.add_argument("--timelimit", choices=["d", "w", "m", "y"], help="Time filter")
+    search.add_argument("--news", action="store_true", default=None, help="Search news")
+    search.add_argument("--include-answer", action="store_true", help="Include an answer when supported")
+    search.add_argument("--search-depth", default="basic", choices=["basic", "advanced"])
+    search.add_argument("--topic", default="general", choices=["general", "news"])
+    search.add_argument("--days", type=int, help="Limit news to recent N days")
+    search.add_argument("--include-domains", nargs="+", help="Domain allowlist")
+    search.add_argument("--exclude-domains", nargs="+", help="Domain blocklist")
+    search.add_argument("--include-content", action="store_true", help="Return pre-extracted page content")
+    search.add_argument("--max-content-tokens", type=int, default=8192, help="Content token budget")
+    search.add_argument("--format", default="md", choices=["json", "md"])
+    search.add_argument("--provider", default="auto", help="Configured provider name or auto")
+    search.add_argument("--super", action="store_true", help="Query all providers in parallel")
 
-    ep = sub.add_parser("extract", help="Extract full page content from URLs (trafilatura)")
-    ep.add_argument("urls", nargs="+", help="URLs to extract")
+    fetch = sub.add_parser(
+        "fetch",
+        aliases=["extract"],
+        help="Fetch and extract full page content; extract is a compatibility alias",
+    )
+    fetch.add_argument("urls", nargs="+", help="URLs to fetch and extract")
+    fetch.add_argument("--query", help="Optional relevance query for fallback renderers")
+    fetch.add_argument("--max-chars", type=int, help="Maximum extracted characters per URL")
+    fetch.add_argument("--format", default="json", choices=["json", "md"])
 
-    args = ap.parse_args()
+    config = sub.add_parser("config", help="Inspect or reload runtime configuration")
+    config.add_argument("action", nargs="?", default="status", choices=["status", "reload"])
+
+    args = parser.parse_args()
     if not args.cmd:
-        ap.print_help()
-        sys.exit(1)
+        parser.print_help()
+        raise SystemExit(1)
 
     try:
-        if args.cmd == "extract":
-            result = await extract_trafilatura(args.urls)
-            if result is None:
-                print(json.dumps({"error": "Extraction failed", "urls": args.urls}))
-                sys.exit(1)
-            json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
-            sys.stdout.write("\n")
+        if args.cmd in ("fetch", "extract"):
+            await _run_fetch(args)
             return
-
-        max_results = max(1, min(args.max_results, 10))
-        results = None
-        answer = None
-        provider_used = None
-
-        registry = ProviderRegistry()
-        registry.load()
-
-        if getattr(args, "super", False):
-            max_results = max(1, min(args.max_results, 20))
-            search_kwargs = {
-                "region": args.region, "timelimit": args.timelimit,
-                "news": args.news, "include_answer": True,
-                "search_depth": args.search_depth, "topic": args.topic,
-                "days": args.days, "include_domains": args.include_domains,
-                "exclude_domains": args.exclude_domains,
-            }
-            providers = registry.get_ordered()
-            tasks = [p.search(args.query, max_results, **search_kwargs) for p in providers]
-            search_results = await asyncio.gather(*tasks, return_exceptions=True)
-            results_by_provider = {}
-            for p, sr in zip(providers, search_results):
-                if isinstance(sr, BaseException) or sr is None:
-                    continue
-                if sr.results:
-                    results_by_provider[p.name] = sr.results
-                    if sr.answer and not answer:
-                        answer = sr.answer
-            if results_by_provider:
-                results, providers_used_list = dedup_and_rank(results_by_provider, max_results)
-                provider_used = ",".join(providers_used_list)
-        else:
-            search_kwargs = {
-                "region": args.region, "timelimit": args.timelimit,
-                "news": args.news, "include_answer": args.include_answer,
-                "search_depth": args.search_depth, "topic": args.topic,
-                "days": args.days, "include_domains": args.include_domains,
-                "exclude_domains": args.exclude_domains,
-            }
-            if args.provider and args.provider != "auto":
-                p = registry.get_by_name(args.provider)
-                if not p:
-                    available = [x.name for x in registry.get_all()]
-                    print(json.dumps({"error": f"Unknown provider '{args.provider}'", "available": available}))
-                    sys.exit(1)
-                if p.enabled:
-                    sr = await p.search(args.query, max_results, **search_kwargs)
-                    if sr:
-                        results = sr.results
-                        answer = sr.answer
-                        provider_used = sr.provider
-            else:
-                for p in registry.get_ordered():
-                    sr = await p.search(args.query, max_results, **search_kwargs)
-                    if sr is not None:
-                        results = sr.results
-                        answer = sr.answer
-                        provider_used = sr.provider
-                        break
-
-        if results is None:
-            print(json.dumps({"error": "All providers failed", "query": args.query}))
-            sys.exit(1)
-
-        if args.format == "md":
-            sys.stdout.write(to_markdown(results, args.query, answer, provider_used))
-        else:
-            out = {"query": args.query, "provider": provider_used, "results": results}
-            if answer:
-                out["answer"] = answer
-            json.dump(out, sys.stdout, ensure_ascii=False)
-            sys.stdout.write("\n")
+        if args.cmd == "config":
+            await _run_config(args)
+            return
+        await _run_search(args)
     finally:
         await close_client()
+
+
+async def _run_fetch(args):
+    try:
+        response = await FetchService().fetch(FetchRequest(urls=args.urls, query=args.query, max_chars=args.max_chars))
+    except FetchServiceError as error:
+        print(json.dumps({"error": str(error), "urls": args.urls}, ensure_ascii=False))
+        raise SystemExit(1) from error
+    if args.format == "md":
+        sys.stdout.write(format_fetch_markdown(response) + "\n")
+    else:
+        json.dump(fetch_response_dict(response), sys.stdout, ensure_ascii=False)
+        sys.stdout.write("\n")
+    if response.extracted_count == 0:
+        raise SystemExit(1)
+
+
+async def _run_config(args):
+    search_service = SearchService()
+    try:
+        result = await ConfigService(search_service.registry, search_service.breaker).execute(args.action)
+    except ConfigServiceError as error:
+        print(json.dumps({"error": str(error), "action": args.action}, ensure_ascii=False))
+        raise SystemExit(1) from error
+    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+
+
+async def _run_search(args):
+    service = SearchService()
+    try:
+        response = await service.search(
+            SearchRequest(
+                query=args.query,
+                max_results=args.max_results,
+                provider=args.provider,
+                mode="super" if args.super else "normal",
+                news=args.news,
+                timelimit=args.timelimit,
+                include_answer=args.include_answer,
+                search_depth=args.search_depth,
+                topic=args.topic,
+                days=args.days,
+                allowed_domains=args.include_domains,
+                blocked_domains=args.exclude_domains,
+                include_content=args.include_content,
+                max_content_tokens=args.max_content_tokens,
+                region=args.region,
+            )
+        )
+    except SearchServiceError as error:
+        unknown = next(
+            (failure for failure in error.failures if str(failure.get("error", "")).startswith("unknown provider")),
+            None,
+        )
+        if unknown is not None:
+            available = [provider.name for provider in service.registry.get_all()]
+            print(json.dumps({"error": f"Unknown provider '{args.provider}'", "available": available}))
+        elif error.code == "INVALID_REQUEST":
+            print(json.dumps({"error": str(error), "query": args.query}))
+        else:
+            print(json.dumps({"error": "All providers failed", "query": args.query}))
+        raise SystemExit(1) from error
+
+    if args.format == "md":
+        sys.stdout.write(format_search_markdown(response))
+    else:
+        output = {"query": args.query, "provider": response.provider, "results": response.results}
+        if response.answer:
+            output["answer"] = response.answer
+        json.dump(output, sys.stdout, ensure_ascii=False)
+        sys.stdout.write("\n")
 
 
 if __name__ == "__main__":

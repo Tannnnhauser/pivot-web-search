@@ -6,30 +6,28 @@ from pivot_web_search_mcp.extraction import _fetch_url, extract_trafilatura
 from pivot_web_search_mcp.http_client import _open_with_fallback
 from pivot_web_search_mcp.validation import validate_url
 
-NEXT_DATA_HTML = '''<html><body>
+NEXT_DATA_HTML = """<html><body>
 <script id="__NEXT_DATA__" type="application/json">
 {"props":{"pageProps":{"title":"Test Page","content":"Hello from Next.js data","items":[1,2,3]}}}
 </script>
-</body></html>'''
+</body></html>"""
 
-NUXT_DATA_HTML = '''<html><body>
+NUXT_DATA_HTML = """<html><body>
 <script id="__NUXT_DATA__" type="application/json">
 {"data":{"title":"Nuxt Page","body":"Nuxt content here"}}
 </script>
-</body></html>'''
+</body></html>"""
 
 RSC_HTML = (
-    '<html><body>\n<script>self.__next_f.push([1,"'
-    + 'x' * 500
-    + '\\"title\\":\\"RSC Article Title\\",'
+    '<html><body>\n<script>self.__next_f.push([1,"' + "x" * 500 + '\\"title\\":\\"RSC Article Title\\",'
     '\\"content\\":\\"This is the body of the RSC article'
     ' with enough text to extract meaningfully.\\""])'
-    '</script>\n</body></html>'
+    "</script>\n</body></html>"
 )
 
 EMPTY_SPA_HTML = '<html><body><div id="root"></div></body></html>'
 
-REAL_ARTICLE_HTML = '''<html><body>
+REAL_ARTICLE_HTML = """<html><body>
 <article>
 <h1>Python Web Frameworks</h1>
 <p>Python has many web frameworks including Django, Flask, and FastAPI.
@@ -38,21 +36,23 @@ Flask is lightweight and gives developers flexibility. FastAPI is modern with au
 API documentation and async support. Each framework has its strengths depending on the
 project requirements and team expertise.</p>
 </article>
-</body></html>'''
+</body></html>"""
 
 
 class TestExtractTrafilatura:
     @patch("pivot_web_search_mcp.extraction._fetch_url", new_callable=AsyncMock)
     async def test_single_url_success(self, mock_fetch):
-        mock_fetch.return_value = (REAL_ARTICLE_HTML.encode(), "text/html")
+        mock_fetch.return_value = (REAL_ARTICLE_HTML.encode(), "text/html", "https://example.com", 200)
         result = await extract_trafilatura(["https://example.com"])
         assert len(result["results"]) == 1
         assert "Python" in result["results"][0]["raw_content"]
+        assert result["results"][0]["final_url"] == "https://example.com"
+        assert result["results"][0]["status_code"] == 200
         assert result["failed_results"] == []
 
     @patch("pivot_web_search_mcp.extraction._fetch_url", new_callable=AsyncMock)
     async def test_fetch_failure(self, mock_fetch):
-        mock_fetch.return_value = (None, "HTTP 404 Not Found")
+        mock_fetch.return_value = (None, "HTTP 404 Not Found", "https://bad.com", 404)
         result = await extract_trafilatura(["https://bad.com"])
         assert len(result["failed_results"]) == 1
         assert "404" in result["failed_results"][0]["error"]
@@ -61,8 +61,8 @@ class TestExtractTrafilatura:
     @patch("pivot_web_search_mcp.extraction._fetch_url", new_callable=AsyncMock)
     async def test_multiple_urls(self, mock_fetch):
         mock_fetch.side_effect = [
-            (REAL_ARTICLE_HTML.encode(), "text/html"),
-            (None, "HTTP 500"),
+            (REAL_ARTICLE_HTML.encode(), "text/html", "https://a.com/final", 200),
+            (None, "HTTP 500", "https://b.com", 500),
         ]
         result = await extract_trafilatura(["https://a.com", "https://b.com"])
         assert len(result["results"]) == 1
@@ -70,7 +70,7 @@ class TestExtractTrafilatura:
 
     @patch("pivot_web_search_mcp.extraction._fetch_url", new_callable=AsyncMock)
     async def test_nextjs_pages_router_fallback(self, mock_fetch):
-        mock_fetch.return_value = (NEXT_DATA_HTML.encode(), "text/html")
+        mock_fetch.return_value = (NEXT_DATA_HTML.encode(), "text/html", "https://spa.com", 200)
         result = await extract_trafilatura(["https://spa.com"])
         assert len(result["results"]) == 1
         content = result["results"][0]["raw_content"]
@@ -79,7 +79,7 @@ class TestExtractTrafilatura:
 
     @patch("pivot_web_search_mcp.extraction._fetch_url", new_callable=AsyncMock)
     async def test_nuxt_fallback(self, mock_fetch):
-        mock_fetch.return_value = (NUXT_DATA_HTML.encode(), "text/html")
+        mock_fetch.return_value = (NUXT_DATA_HTML.encode(), "text/html", "https://nuxt-app.com", 200)
         result = await extract_trafilatura(["https://nuxt-app.com"])
         assert len(result["results"]) == 1
         content = result["results"][0]["raw_content"]
@@ -88,7 +88,7 @@ class TestExtractTrafilatura:
 
     @patch("pivot_web_search_mcp.extraction._fetch_url", new_callable=AsyncMock)
     async def test_empty_spa_fails(self, mock_fetch):
-        mock_fetch.return_value = (EMPTY_SPA_HTML.encode(), "text/html")
+        mock_fetch.return_value = (EMPTY_SPA_HTML.encode(), "text/html", "https://empty-spa.com", 200)
         result = await extract_trafilatura(["https://empty-spa.com"])
         assert len(result["failed_results"]) == 1
         err = result["failed_results"][0]["error"].lower()
@@ -96,7 +96,7 @@ class TestExtractTrafilatura:
 
     @patch("pivot_web_search_mcp.extraction._fetch_url", new_callable=AsyncMock)
     async def test_rsc_payload_fallback(self, mock_fetch):
-        mock_fetch.return_value = (RSC_HTML.encode(), "text/html")
+        mock_fetch.return_value = (RSC_HTML.encode(), "text/html", "https://rsc-app.com", 200)
         result = await extract_trafilatura(["https://rsc-app.com"])
         if result["results"]:
             content = result["results"][0]["raw_content"]
@@ -104,7 +104,7 @@ class TestExtractTrafilatura:
 
     @patch("pivot_web_search_mcp.extraction._fetch_url", new_callable=AsyncMock)
     async def test_returns_dict_never_none(self, mock_fetch):
-        mock_fetch.return_value = (None, "connection refused")
+        mock_fetch.return_value = (None, "connection refused", "https://x.com", None)
         result = await extract_trafilatura(["https://x.com"])
         assert isinstance(result, dict)
         assert "results" in result
@@ -114,50 +114,71 @@ class TestExtractTrafilatura:
 class TestValidateUrlSsrf:
     def test_rejects_localhost(self):
         import pytest
-        with patch("socket.getaddrinfo", return_value=[
-            (2, 1, 0, "", ("127.0.0.1", 0))
-        ]):
+
+        with patch("socket.getaddrinfo", return_value=[(2, 1, 0, "", ("127.0.0.1", 0))]):
             with pytest.raises(ValueError, match="private"):
                 validate_url("https://evil.example.com/path")
 
     def test_rejects_private_10_range(self):
         import pytest
-        with patch("socket.getaddrinfo", return_value=[
-            (2, 1, 0, "", ("10.0.0.1", 0))
-        ]):
+
+        with patch("socket.getaddrinfo", return_value=[(2, 1, 0, "", ("10.0.0.1", 0))]):
             with pytest.raises(ValueError, match="private"):
                 validate_url("https://internal.example.com")
 
     def test_rejects_link_local(self):
         import pytest
-        with patch("socket.getaddrinfo", return_value=[
-            (2, 1, 0, "", ("169.254.169.254", 0))
-        ]):
+
+        with patch("socket.getaddrinfo", return_value=[(2, 1, 0, "", ("169.254.169.254", 0))]):
             with pytest.raises(ValueError, match="private"):
                 validate_url("https://metadata.example.com")
 
     def test_allows_public_ip(self):
-        with patch("socket.getaddrinfo", return_value=[
-            (2, 1, 0, "", ("93.184.216.34", 0))
-        ]):
+        with patch("socket.getaddrinfo", return_value=[(2, 1, 0, "", ("93.184.216.34", 0))]):
             result = validate_url("https://example.com/path")
             assert result == "https://example.com/path"
 
     def test_dns_failure_passes_through(self):
         import socket as _socket
+
         with patch("socket.getaddrinfo", side_effect=_socket.gaierror("DNS failed")):
             result = validate_url("https://nonexistent.example.com")
             assert "nonexistent.example.com" in result
 
 
 class TestCrossHostRedirect:
+    async def test_binary_response_keeps_fetch_metadata(self):
+        import httpx
+
+        response = httpx.Response(
+            200,
+            content=b"%PDF",
+            headers={"content-type": "application/pdf"},
+            request=httpx.Request("GET", "https://example.com/file.pdf"),
+        )
+        with patch(
+            "pivot_web_search_mcp.extraction._open_with_fallback",
+            new_callable=AsyncMock,
+            return_value=response,
+        ):
+            result = await _fetch_url("https://example.com/file.pdf")
+
+        assert result == (
+            None,
+            "binary content (application/pdf), skipping extraction",
+            "https://example.com/file.pdf",
+            200,
+        )
+
     async def test_cross_host_blocked(self):
         """Cross-host redirects raise CrossHostRedirect exception."""
         import httpx
 
         mock_resp_redirect = httpx.Response(
-            301, headers={"location": "https://evil.com/phish"},
-            request=httpx.Request("GET", "https://example.com/page"))
+            301,
+            headers={"location": "https://evil.com/phish"},
+            request=httpx.Request("GET", "https://example.com/page"),
+        )
 
         with patch("pivot_web_search_mcp.http_client._do_request", new_callable=AsyncMock) as mock_req:
             mock_req.return_value = mock_resp_redirect
@@ -170,12 +191,16 @@ class TestCrossHostRedirect:
         import httpx
 
         mock_resp_redirect = httpx.Response(
-            301, headers={"location": "https://example.com/new"},
-            request=httpx.Request("GET", "https://example.com/old"))
+            301,
+            headers={"location": "https://example.com/new"},
+            request=httpx.Request("GET", "https://example.com/old"),
+        )
         mock_resp_final = httpx.Response(
-            200, content=b"<html><body>Content</body></html>",
+            200,
+            content=b"<html><body>Content</body></html>",
             headers={"content-type": "text/html"},
-            request=httpx.Request("GET", "https://example.com/new"))
+            request=httpx.Request("GET", "https://example.com/new"),
+        )
 
         with patch("pivot_web_search_mcp.http_client._do_request", new_callable=AsyncMock) as mock_req:
             mock_req.side_effect = [mock_resp_redirect, mock_resp_final]

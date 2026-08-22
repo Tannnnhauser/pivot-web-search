@@ -1,0 +1,26 @@
+# Optional out-of-tree DSH bundle. It selects the provider registered below;
+# no DeepSeek Harness source file needs to be edited.
+- id: web
+  config:
+    searchProvider: pivot
+    fetchProvider: pivot
+
+- id: tool-web
+  disabled: false
+  config:
+    fetch: true
+    searchTimeoutMs: 60000
+    fetchTimeoutMs: 60000
+
+- insert:
+    - id: pivot-web-search-provider
+      name: pivot-web-search-dsh
+      config:
+        command: pivot-web-search-bridge
+        mode: normal
+        env:
+          TAVILY_API_KEY: !!js process.env.TAVILY_API_KEY || ''
+          BRAVE_API_KEY: !!js process.env.BRAVE_API_KEY || ''
+          GEMINI_SEARCH_API_KEY: !!js process.env.GEMINI_SEARCH_API_KEY || ''
+          GOOGLE_STUDIO_API_KEY: !!js process.env.GOOGLE_STUDIO_API_KEY || ''
+          PIVOT_WEB_SEARCH_PROXIES: !!js process.env.PIVOT_WEB_SEARCH_PROXIES || ''
