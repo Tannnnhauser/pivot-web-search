@@ -6,14 +6,17 @@ import time
 from unittest.mock import AsyncMock, patch
 
 from pivot_web_search_mcp import server
+from pivot_web_search_mcp.fetch_service import FetchItem, FetchResponse
 from pivot_web_search_mcp.providers import SearchProvider, SearchResult
 from pivot_web_search_mcp.routing import execute_super_search
+from pivot_web_search_mcp.search_service import SearchResponse, SearchServiceError, apply_smart_defaults
 
 
 class TestWebSearch:
-    @patch.object(server, '_search_with_registry', new_callable=AsyncMock)
+    @patch.object(server._service, "search", new_callable=AsyncMock)
     async def test_normal_output(self, mock_search):
-        mock_search.return_value = SearchResult(
+        mock_search.return_value = SearchResponse(
+            query="test query",
             results=[{"title": "Example", "url": "https://example.com", "snippet": "A test result"}],
             provider="ddg",
         )
@@ -22,17 +25,18 @@ class TestWebSearch:
         assert "Sources:" in result
         assert "https://example.com" in result
 
-    @patch.object(server, '_search_with_registry', new_callable=AsyncMock)
+    @patch.object(server._service, "search", new_callable=AsyncMock)
     async def test_all_providers_fail(self, mock_search):
-        mock_search.return_value = None
+        mock_search.side_effect = SearchServiceError("SEARCH_FAILED", "All providers failed")
         result = await server.WebSearch("failing query")
         parsed = json.loads(result)
         assert "error" in parsed
         assert "All providers failed" in parsed["error"]
 
-    @patch.object(server, '_search_with_registry', new_callable=AsyncMock)
+    @patch.object(server._service, "search", new_callable=AsyncMock)
     async def test_domain_filtering_applied(self, mock_search):
-        mock_search.return_value = SearchResult(
+        mock_search.return_value = SearchResponse(
+            query="test",
             results=[
                 {"title": "Good", "url": "https://good.com/page", "snippet": "ok"},
             ],
@@ -41,15 +45,18 @@ class TestWebSearch:
         result = await server.WebSearch("test", allowed_domains=["good.com"])
         assert "Good" in result
         assert "good.com" in result
+        assert mock_search.await_args.args[0].allowed_domains == ["good.com"]
 
-    @patch.object(server, 'execute_super_search', new_callable=AsyncMock)
+    @patch.object(server._service, "search", new_callable=AsyncMock)
     async def test_super_mode(self, mock_super):
-        mock_super.return_value = SearchResult(
+        mock_super.return_value = SearchResponse(
+            query="test",
             results=[{"title": "Multi", "url": "https://m.com", "snippet": "x"}],
             provider="ddg,tavily",
         )
         result = await server.WebSearch("test", super_mode=True)
         assert "Multi" in result
+        assert mock_super.await_args.args[0].mode == "super"
 
     async def test_empty_query_error(self):
         result = await server.WebSearch("")
@@ -61,11 +68,13 @@ class TestWebSearch:
         parsed = json.loads(result)
         assert "error" in parsed
 
-    @patch("pivot_web_search_mcp.server.search_brave_llm_context", new_callable=AsyncMock)
-    async def test_include_content_mode(self, mock_llm):
-        mock_llm.return_value = (
-            [{"title": "Page", "url": "https://p.com", "snippet": "text", "snippets": ["chunk1"]}],
-            {},
+    @patch.object(server._service, "search", new_callable=AsyncMock)
+    async def test_include_content_mode(self, mock_search):
+        mock_search.return_value = SearchResponse(
+            query="test",
+            results=[{"title": "Page", "url": "https://p.com", "snippet": "text", "snippets": ["chunk1"]}],
+            provider="brave-llm-context",
+            content_included=True,
         )
         result = await server.WebSearch("test", include_content=True)
         assert "chunk1" in result
@@ -73,60 +82,60 @@ class TestWebSearch:
 
 
 class TestWebFetch:
-    @patch("pivot_web_search_mcp.fetch.render_with_fallback", new_callable=AsyncMock)
-    @patch("pivot_web_search_mcp.server.extract_trafilatura", new_callable=AsyncMock)
-    async def test_success(self, mock_extract, mock_fallback):
-        mock_extract.return_value = {
-            "results": [{"url": "https://example.com", "raw_content": "# Content here"}],
-            "failed_results": [],
-        }
-        mock_fallback.return_value = None
+    @patch.object(server._fetch_service, "fetch", new_callable=AsyncMock)
+    async def test_success(self, mock_fetch):
+        mock_fetch.return_value = FetchResponse([FetchItem(url="https://example.com", content="# Content here")])
         result = await server.WebFetch("https://example.com", "extract main content")
         assert "Content here" in result
         assert "example.com" in result
+        assert mock_fetch.await_args.args[0].query == "extract main content"
 
-    @patch("pivot_web_search_mcp.fetch.render_with_fallback", new_callable=AsyncMock)
-    @patch("pivot_web_search_mcp.server.extract_trafilatura", new_callable=AsyncMock)
-    async def test_extraction_failure(self, mock_extract, mock_fallback):
-        mock_extract.return_value = {
-            "results": [],
-            "failed_results": [{"url": "https://bad.com", "error": "timeout"}],
-        }
-        mock_fallback.return_value = None
+    @patch.object(server._fetch_service, "fetch", new_callable=AsyncMock)
+    async def test_extraction_failure(self, mock_fetch):
+        mock_fetch.return_value = FetchResponse([FetchItem(url="https://bad.com", error="timeout")])
         result = await server.WebFetch("https://bad.com", "test")
         parsed = json.loads(result)
-        assert "error" in parsed
+        assert parsed == {"error": "timeout", "url": "https://bad.com"}
 
     async def test_empty_url(self):
         result = await server.WebFetch("", "test")
         parsed = json.loads(result)
         assert "error" in parsed
 
-    @patch("pivot_web_search_mcp.fetch.render_with_fallback", new_callable=AsyncMock)
-    @patch("pivot_web_search_mcp.server.extract_trafilatura", new_callable=AsyncMock)
-    async def test_batch_mode(self, mock_extract, mock_fallback):
-        mock_extract.return_value = {
-            "results": [
-                {"url": "https://a.com", "raw_content": "Content A"},
-                {"url": "https://b.com", "raw_content": "Content B"},
-            ],
-            "failed_results": [],
-        }
-        mock_fallback.return_value = None
+    @patch.object(server._fetch_service, "fetch", new_callable=AsyncMock)
+    async def test_batch_mode(self, mock_fetch):
+        mock_fetch.return_value = FetchResponse(
+            [
+                FetchItem(url="https://a.com", content="Content A"),
+                FetchItem(url="https://b.com", content="Content B"),
+            ]
+        )
         result = await server.WebFetch(["https://a.com", "https://b.com"], "extract")
         assert "Content A" in result
         assert "Content B" in result
         assert "2/2" in result
 
-    @patch("pivot_web_search_mcp.fetch.render_with_fallback", new_callable=AsyncMock)
-    @patch("pivot_web_search_mcp.server.extract_trafilatura", new_callable=AsyncMock)
-    async def test_max_chars_truncation(self, mock_extract, mock_fallback):
-        long_content = "x" * 500
-        mock_extract.return_value = {
-            "results": [{"url": "https://example.com", "raw_content": long_content}],
-            "failed_results": [],
-        }
-        mock_fallback.return_value = None
+    @patch.object(server._fetch_service, "fetch", new_callable=AsyncMock)
+    async def test_batch_mode_omits_invalid_urls_from_output_and_denominator(self, mock_fetch):
+        mock_fetch.return_value = FetchResponse(
+            [
+                FetchItem(url="https://a.com", content="Content A"),
+                FetchItem(url="not-a-url", error="unsupported URL", invalid=True),
+                FetchItem(url="https://b.com", content="Content B"),
+            ]
+        )
+        result = await server.WebFetch(["https://a.com", "not-a-url", "https://b.com"], "extract")
+        assert "Content A" in result
+        assert "Content B" in result
+        # Validation-failed URL is omitted entirely and excluded from the denominator.
+        assert "not-a-url" not in result
+        assert "2/2" in result
+
+    @patch.object(server._fetch_service, "fetch", new_callable=AsyncMock)
+    async def test_max_chars_truncation(self, mock_fetch):
+        mock_fetch.return_value = FetchResponse(
+            [FetchItem(url="https://example.com", content="x" * 100, truncated=True)]
+        )
         result = await server.WebFetch("https://example.com", "test", max_chars=100)
         assert "[Content truncated" in result
 
@@ -158,13 +167,15 @@ class TestWebSearchConfig:
 
 
 class TestStructuredErrors:
-    @patch.object(server, '_search_with_registry', new_callable=AsyncMock)
+    @patch.object(server._service, "search", new_callable=AsyncMock)
     async def test_failure_info_includes_provider_errors(self, mock_search):
-        mock_search.return_value = server.FailureInfo(
+        mock_search.side_effect = SearchServiceError(
+            "SEARCH_FAILED",
+            "All providers failed",
             failures=[
                 {"provider": "ddg", "error": "timeout"},
                 {"provider": "tavily", "error": "no api key"},
-            ]
+            ],
         )
         result = await server.WebSearch("test query")
         parsed = json.loads(result)
@@ -174,19 +185,23 @@ class TestStructuredErrors:
         assert "suggestions" in parsed
         assert len(parsed["suggestions"]) > 0
 
-    @patch.object(server, '_search_with_registry', new_callable=AsyncMock)
+    @patch.object(server._service, "search", new_callable=AsyncMock)
     async def test_failure_suggestions_api_key(self, mock_search):
-        mock_search.return_value = server.FailureInfo(
-            failures=[{"provider": "tavily", "error": "no api key configured"}]
+        mock_search.side_effect = SearchServiceError(
+            "SEARCH_FAILED",
+            "All providers failed",
+            failures=[{"provider": "tavily", "error": "no api key configured"}],
         )
         result = await server.WebSearch("test")
         parsed = json.loads(result)
         assert any("API keys" in s for s in parsed["suggestions"])
 
-    @patch.object(server, '_search_with_registry', new_callable=AsyncMock)
+    @patch.object(server._service, "search", new_callable=AsyncMock)
     async def test_failure_suggestions_timeout(self, mock_search):
-        mock_search.return_value = server.FailureInfo(
-            failures=[{"provider": "ddg", "error": "connection timeout"}]
+        mock_search.side_effect = SearchServiceError(
+            "SEARCH_FAILED",
+            "All providers failed",
+            failures=[{"provider": "ddg", "error": "connection timeout"}],
         )
         result = await server.WebSearch("test")
         parsed = json.loads(result)
@@ -195,6 +210,7 @@ class TestStructuredErrors:
 
 class _SuperFakeProvider(SearchProvider):
     """Configurable provider for super-mode tests."""
+
     provider_type = "fake"
 
     def __init__(self, name, results=None, raise_exc=None, delay=0.0, timeout=5.0, priority=10):
@@ -280,24 +296,23 @@ class TestSuperMode:
 
 class TestSmartDefaults:
     def test_english_time_sensitive_sets_timelimit(self):
-        out = server._apply_smart_defaults("latest news on AI", {"timelimit": None, "news": None})
+        out = apply_smart_defaults("latest news on AI", {"timelimit": None, "news": None})
         assert out["timelimit"] == "m"
 
     def test_cjk_time_sensitive_sets_timelimit(self):
-        out = server._apply_smart_defaults("今年的最新新闻", {"timelimit": None, "news": None})
+        out = apply_smart_defaults("今年的最新新闻", {"timelimit": None, "news": None})
         assert out["timelimit"] == "m"
 
     def test_news_only_query_sets_news_but_not_timelimit(self):
         # Behavioral: query matches only the news pattern, not the
         # time-sensitive pattern. The function must apply news=True while
         # leaving timelimit=None — proving the two detectors are independent.
-        out = server._apply_smart_defaults(
-            "breaking news on quantum mechanics", {"timelimit": None, "news": None})
+        out = apply_smart_defaults("breaking news on quantum mechanics", {"timelimit": None, "news": None})
         assert out["news"] is True
         assert out["timelimit"] is None
 
     def test_news_mode_detection(self):
-        out = server._apply_smart_defaults("breaking news on election", {"timelimit": None, "news": None})
+        out = apply_smart_defaults("breaking news on election", {"timelimit": None, "news": None})
         assert out["news"] is True
 
     def test_returns_new_dict_with_modifications_applied(self):
@@ -305,7 +320,7 @@ class TestSmartDefaults:
         # and (b) the fresh dict must reflect the smart-defaults transformation.
         # A pass-through stub that returned the input unchanged would fail both.
         kwargs = {"timelimit": None, "news": None}
-        out = server._apply_smart_defaults("latest news on AI", kwargs)
+        out = apply_smart_defaults("latest news on AI", kwargs)
         assert out is not kwargs, "should return a copy, not mutate caller's dict"
         assert out["timelimit"] == "m"
         assert kwargs["timelimit"] is None, "caller's dict must not be mutated"
@@ -314,14 +329,13 @@ class TestSmartDefaults:
         # Behavioral: with timelimit explicitly set, the function must NOT
         # overwrite it — but it must still apply news=True from the news
         # pattern. A pass-through stub would return news=None and fail.
-        out = server._apply_smart_defaults(
-            "latest breaking news", {"timelimit": "d", "news": None})
+        out = apply_smart_defaults("latest breaking news", {"timelimit": "d", "news": None})
         assert out["timelimit"] == "d", "explicit timelimit must be preserved"
         assert out["news"] is True, "news default must still be applied"
 
 
 class TestExplicitProviderFailure:
-    @patch.object(server._registry, 'get_by_name')
+    @patch.object(server._registry, "get_by_name")
     async def test_explicit_provider_failure_records_breaker(self, mock_get):
         provider = _SuperFakeProvider("tavily", raise_exc=RuntimeError("api down"))
         mock_get.return_value = provider

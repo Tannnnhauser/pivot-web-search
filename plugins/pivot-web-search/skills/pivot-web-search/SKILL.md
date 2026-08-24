@@ -28,13 +28,10 @@ The server handles provider selection, failover, quota management, and result qu
 
 ## mcp__pivot-web-search__WebFetch
 
-### How to Use the `prompt` Parameter
-
-The `prompt` parameter is **passed through** alongside the extracted content — the MCP server does not filter or summarize. **You** should apply the prompt yourself:
-
-1. Pass a specific prompt describing what you need (e.g., "Extract the API authentication section")
-2. When the content returns, **focus your response on what the prompt asked for**
-3. Don't dump the entire extracted content to the user — summarize based on the prompt
+Pass `url` as a string or list of strings. Use the optional `query` parameter
+when a configured fallback renderer should focus extraction on a topic, and
+`max_chars` to override the configured output limit. The tool has no required
+`prompt` parameter; apply the user's request when interpreting returned content.
 
 ### Limitations
 

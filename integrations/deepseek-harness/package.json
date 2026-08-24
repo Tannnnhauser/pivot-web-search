@@ -1,0 +1,29 @@
+{
+  "name": "pivot-web-search-dsh",
+  "version": "1.1.0",
+  "description": "Out-of-tree DeepSeek Harness provider bundle for Pivot Web Search",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./protocol": "./src/protocol.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src/*.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

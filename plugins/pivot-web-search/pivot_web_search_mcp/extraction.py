@@ -25,7 +25,10 @@ FETCH_CACHE_TTL = 15 * 60  # 15 minutes
 FETCH_CACHE_MAX = 64  # max cached URLs
 FETCH_CACHE_MAX_BYTES = 50 * 1024 * 1024  # 50 MB total memory budget
 
-_FetchCacheEntry = collections.namedtuple("_FetchCacheEntry", ["content", "content_type", "ts"])
+_FetchCacheEntry = collections.namedtuple(
+    "_FetchCacheEntry",
+    ["content", "content_type", "final_url", "status_code", "ts"],
+)
 _fetch_cache: collections.OrderedDict = collections.OrderedDict()
 _fetch_cache_lock = asyncio.Lock()
 _fetch_cache_bytes: int = 0
@@ -44,7 +47,8 @@ TAVILY_EXTRACT_URL = "https://api.tavily.com/extract"
 async def _fetch_url(url, timeout=30):
     """Fetch raw content from a URL using the proxy-fallback layer.
 
-    Returns (body_bytes, content_type) or (None, error_string) on failure.
+    Returns (body_bytes, content_type, final_url, status_code), with the first
+    two fields replaced by (None, error_string) on failure.
     Enforces: scheme validation, size cap, binary detection, redirect safety, caching.
     """
     # Check cache first
@@ -53,20 +57,30 @@ async def _fetch_url(url, timeout=30):
         if cached_entry and (time.time() - cached_entry.ts) < FETCH_CACHE_TTL:
             _fetch_cache.move_to_end(url)
             log(f"cache hit: {url}")
-            return cached_entry.content, cached_entry.content_type
+            return (
+                cached_entry.content,
+                cached_entry.content_type,
+                cached_entry.final_url,
+                cached_entry.status_code,
+            )
 
     try:
         url = validate_url(url)
     except ValueError as e:
-        return None, str(e)
+        return None, str(e), url, None
 
     try:
         resp = await _open_with_fallback(
-            "GET", url, timeout=timeout,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; pivot-web-search/1.0)"})
+            "GET", url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0 (compatible; pivot-web-search/1.0)"}
+        )
         ct = resp.headers.get("content-type", "")
         if _is_binary_content_type(ct):
-            return None, f"binary content ({ct.split(';')[0].strip()}), skipping extraction"
+            return (
+                None,
+                f"binary content ({ct.split(';')[0].strip()}), skipping extraction",
+                str(resp.url),
+                resp.status_code,
+            )
 
         body = resp.content
         if len(body) > MAX_FETCH_BYTES:
@@ -76,7 +90,7 @@ async def _fetch_url(url, timeout=30):
         # Store in cache
         async with _fetch_cache_lock:
             global _fetch_cache_bytes
-            entry = _FetchCacheEntry(body, ct, time.time())
+            entry = _FetchCacheEntry(body, ct, str(resp.url), resp.status_code, time.time())
             entry_size = len(body)
             _fetch_cache[url] = entry
             _fetch_cache.move_to_end(url)
@@ -90,16 +104,16 @@ async def _fetch_url(url, timeout=30):
                 _, evicted = _fetch_cache.popitem(last=False)
                 _fetch_cache_bytes -= len(evicted.content) if evicted.content else 0
 
-        return body, ct
+        return body, ct, str(resp.url), resp.status_code
 
     except CrossHostRedirect as e:
-        return None, f"cross-host redirect blocked; re-request with: {e.location}"
+        return None, f"cross-host redirect blocked; re-request with: {e.location}", url, None
     except httpx.HTTPStatusError as e:
         log(f"fetch HTTP {e.response.status_code} for {url}")
-        return None, f"HTTP {e.response.status_code}"
+        return None, f"HTTP {e.response.status_code}", str(e.response.url), e.response.status_code
     except Exception as e:
         log(f"fetch failed for {url}: {e}")
-        return None, str(e)
+        return None, str(e), url, None
 
 
 # ---------------------------------------------------------------------------
@@ -116,9 +130,7 @@ def _extract_nextjs_data(html):
     3. __NUXT_DATA__ (Nuxt.js) — JSON in <script id="__NUXT_DATA__">
     """
     # Pattern 1: Classic __NEXT_DATA__
-    match = re.search(
-        r'<script\s+id="__NEXT_DATA__"[^>]*>(.*?)</script>',
-        html, re.DOTALL)
+    match = re.search(r'<script\s+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
     if match:
         try:
             data = json.loads(match.group(1))
@@ -130,24 +142,22 @@ def _extract_nextjs_data(html):
             pass
 
     # Pattern 2: RSC payload — look for meaningful content in script tags
-    scripts_with_data = re.findall(
-        r'<script[^>]*>(.*?)</script>', html, re.DOTALL)
+    scripts_with_data = re.findall(r"<script[^>]*>(.*?)</script>", html, re.DOTALL)
     for script in scripts_with_data:
         if len(script) < 500:
             continue
         if '\\"title\\"' in script or '\\"content\\"' in script or '\\"body\\"' in script:
             try:
-                unescaped = script.replace('\\"', '"').replace('\\\\', '\\')
+                unescaped = script.replace('\\"', '"').replace("\\\\", "\\")
                 titles = re.findall(r'"title"\s*:\s*"([^"]{10,})"', unescaped)
-                bodies = re.findall(
-                    r'"(?:body|content|summary|description|text)"\s*:\s*"([^"]{20,})"', unescaped)
+                bodies = re.findall(r'"(?:body|content|summary|description|text)"\s*:\s*"([^"]{20,})"', unescaped)
                 if titles or bodies:
                     parts = []
                     for t in titles[:10]:
-                        clean = re.sub(r'\\n', '\n', t)
+                        clean = re.sub(r"\\n", "\n", t)
                         parts.append(f"## {clean}")
                     for b in bodies[:10]:
-                        clean = re.sub(r'\\n', '\n', b)
+                        clean = re.sub(r"\\n", "\n", b)
                         parts.append(clean)
                     if parts:
                         return "[Extracted from Next.js RSC data]\n\n" + "\n\n".join(parts)
@@ -155,9 +165,7 @@ def _extract_nextjs_data(html):
                 pass
 
     # Pattern 3: __NUXT_DATA__
-    match = re.search(
-        r'<script\s+id="__NUXT_DATA__"[^>]*>(.*?)</script>',
-        html, re.DOTALL)
+    match = re.search(r'<script\s+id="__NUXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
     if match:
         try:
             data = json.loads(match.group(1))
@@ -189,41 +197,55 @@ async def extract_trafilatura(urls):
         return {"results": [], "failed_results": [{"url": u, "error": "trafilatura not installed"} for u in urls]}
 
     async def _extract_one(url):
-        """Fetch and extract a single URL. Returns (url, text, error)."""
+        """Fetch and extract a single URL with retrieval metadata."""
         try:
-            raw, ct_or_err = await _fetch_url(url)
+            raw, ct_or_err, final_url, status_code = await _fetch_url(url)
             if raw is None:
-                return (url, None, ct_or_err)
+                return (url, final_url, status_code, None, ct_or_err)
             html = raw.decode("utf-8", errors="replace")
 
             # trafilatura is CPU-bound — run in thread
             text = await asyncio.to_thread(
-                trafilatura.extract, html, output_format="markdown",
-                include_links=True, include_tables=True)
+                trafilatura.extract, html, output_format="markdown", include_links=True, include_tables=True
+            )
             if text:
                 log(f"extracted: {url}")
-                return (url, text, None)
+                return (url, final_url, status_code, text, None)
 
             # Fallback: try Next.js/Nuxt.js data extraction
             nextjs_text = _extract_nextjs_data(html)
             if nextjs_text:
                 log(f"extracted via Next.js fallback: {url}")
-                return (url, nextjs_text, None)
+                return (url, final_url, status_code, nextjs_text, None)
 
-            return (url, None, "extraction returned empty (trafilatura + nextjs both failed)")
+            return (url, final_url, status_code, None, "extraction returned empty (trafilatura + nextjs both failed)")
         except Exception as e:
             log(f"extract failed for {url}: {e}")
-            return (url, None, str(e))
+            return (url, url, None, None, str(e))
 
     extractions = await asyncio.gather(*[_extract_one(u) for u in urls])
 
     results = []
     failed = []
-    for url, text, err in extractions:
+    for url, final_url, status_code, text, err in extractions:
         if text:
-            results.append({"url": url, "raw_content": text})
+            results.append(
+                {
+                    "url": url,
+                    "final_url": final_url,
+                    "status_code": status_code,
+                    "raw_content": text,
+                }
+            )
         else:
-            failed.append({"url": url, "error": err})
+            failed.append(
+                {
+                    "url": url,
+                    "final_url": final_url,
+                    "status_code": status_code,
+                    "error": err,
+                }
+            )
 
     return {"results": results, "failed_results": failed}
 
@@ -233,8 +255,9 @@ async def extract_trafilatura(urls):
 # ---------------------------------------------------------------------------
 
 
-async def extract_tavily(urls, extract_depth="advanced", fmt="markdown", timeout=30,
-                         query=None, chunks_per_source=None):
+async def extract_tavily(
+    urls, extract_depth="advanced", fmt="markdown", timeout=30, query=None, chunks_per_source=None
+):
     """Extract content from URLs via Tavily Extract API.
 
     Returns same shape as extract_trafilatura: {"results": [...], "failed_results": [...]}.
@@ -258,9 +281,12 @@ async def extract_tavily(urls, extract_depth="advanced", fmt="markdown", timeout
     data = json.dumps(payload).encode("utf-8")
     try:
         resp = await _open_with_fallback(
-            "POST", TAVILY_EXTRACT_URL,
+            "POST",
+            TAVILY_EXTRACT_URL,
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
-            data=data, timeout=max(timeout + 5, 35))
+            data=data,
+            timeout=max(timeout + 5, 35),
+        )
         obj = resp.json()
 
         results = []

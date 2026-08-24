@@ -10,11 +10,21 @@ graph TB
         Health[SessionStart Hook<br/>health-check.py]
     end
 
-    subgraph "MCP Server (stdio)"
+    subgraph "Plugin and Local Interfaces"
         Server[server.py — FastMCP]
         WS[WebSearch Tool]
         WF[WebFetch Tool]
         WC[WebSearchConfig Tool]
+        CLI[cli.py]
+        Bridge[machine_bridge.py]
+    end
+
+    SearchCore[search_service.py]
+    FetchCore[fetch_service.py]
+    ConfigCore[config_service.py]
+
+    subgraph "Optional External Adapters"
+        DSH[pivot-web-search-dsh<br/>out-of-tree Profile Bundle]
     end
 
     subgraph "Provider Layer"
@@ -50,15 +60,25 @@ graph TB
     Server --> WF
     Server --> WC
 
-    WS -->|normal mode| Registry
-    WS -->|super mode| Registry
-    WS -->|include_content| BLC
+    WS --> SearchCore
+    WF --> FetchCore
+    WC --> ConfigCore
+    CLI --> SearchCore
+    CLI --> FetchCore
+    CLI --> ConfigCore
+    DSH --> Bridge
+    Bridge --> SearchCore
+    Bridge --> FetchCore
+
+    SearchCore -->|normal mode| Registry
+    SearchCore -->|super mode| Registry
+    SearchCore -->|include_content| BLC
     Registry --> P1
     Registry --> P2
     Registry --> P3
     Registry --> PN
 
-    WF --> Traf
+    FetchCore --> Traf
     Traf -->|empty?| SPA
     SPA -->|fallback| PW
     SPA -->|fallback| TE
@@ -76,9 +96,21 @@ graph TB
     Proxy --> Lock
 
     Registry --> Quota
-    WS --> Quota
+    SearchCore --> Quota
     Config --> Registry
 ```
+
+## Product and Adoption Boundary
+
+The repository's product is the Claude Code Plugin. MCP is the Plugin's
+model-facing transport, while the CLI and machine bridge are additional
+interfaces over the same Python services.
+
+Host adoption is always out-of-tree. A host either connects to the MCP server
+or installs a thin adapter maintained by Pivot. The DeepSeek Harness adapter is
+such a package: its Profile Bundle registers providers through DSH's published
+`ctx.web` and `ctx.subprocess` contracts. It does not patch, fork, or require a
+build of the DSH source repository.
 
 ## Request Flow — WebSearch
 
@@ -86,6 +118,7 @@ graph TB
 sequenceDiagram
     participant LLM as Claude (LLM)
     participant S as server.py
+    participant C as search_service.py
     participant RT as routing.py
     participant QG as quality_gate.py
     participant Q as Quota Manager
@@ -93,21 +126,20 @@ sequenceDiagram
     participant P as Provider (Tavily/Brave/DDG/Gemini/...)
 
     LLM->>S: WebSearch(query, ...)
-    S->>S: _apply_smart_defaults(query)
+    S->>C: SearchRequest
+    C->>C: validate + smart defaults
     
     alt include_content=true
-        S->>S: search_brave_llm_context(query)
-        S-->>LLM: formatted content results
+        C->>C: search_brave_llm_context(query)
     else super_mode=true
-        S->>RT: select_providers(affinity filter)
+        C->>RT: select_providers(affinity filter)
         RT->>Q: skip exhausted providers
         RT->>RT: skip circuit-broken providers
-        S->>P: parallel search (per-provider timeouts)
-        P-->>S: results from each provider
-        S->>S: deduplicate & rank (provider-agreement count)
-        S-->>LLM: merged markdown results
+        C->>P: parallel search (per-provider timeouts)
+        P-->>C: results from each provider
+        C->>C: deduplicate & rank (provider-agreement count)
     else normal mode
-        S->>RT: execute_search(query, providers, breaker)
+        C->>RT: execute_search(query, providers, breaker)
         RT->>RT: select_providers (affinity + quota + breaker gates)
         RT->>RT: build_priority_groups (group by effective_priority)
         loop each priority group (high → low)
@@ -119,13 +151,14 @@ sequenceDiagram
             end
             RT->>QG: quality_gate(query, results, answer)
             alt verdict = ACCEPT
-                RT-->>S: return result
+                RT-->>C: return result
             else verdict = PARTIAL
                 RT->>RT: keep best, try next group
             end
         end
-        S-->>LLM: formatted markdown
     end
+    C-->>S: structured SearchResponse
+    S-->>LLM: Markdown string
 ```
 
 ## Request Flow — WebFetch
@@ -134,27 +167,30 @@ sequenceDiagram
 sequenceDiagram
     participant LLM as Claude (LLM)
     participant S as server.py
+    participant F as fetch_service.py
     participant T as trafilatura
-    participant F as fetch.py (SPA detection)
+    participant H as fetch.py (SPA detection)
     participant R as JS Renderer (Playwright/Tavily)
 
-    LLM->>S: WebFetch(url, prompt, query?, max_chars?)
-    S->>S: validate URL(s)
-    S->>T: extract_trafilatura(urls)
-    T-->>S: extracted content
+    LLM->>S: WebFetch(url, query?, max_chars?)
+    S->>F: FetchRequest
+    F->>F: validate URL(s)
+    F->>T: extract_trafilatura(urls)
+    T-->>F: extracted content
 
     loop each URL
-        S->>F: is_empty_content(content)?
+        F->>H: is_empty_content(content)?
         alt content is empty / SPA shell
-            S->>F: render_with_fallback(url, config, query)
-            F->>R: render (based on js_renderer config)
-            R-->>F: rendered content
-            F-->>S: fallback content
+            F->>H: render_with_fallback(url, config, query)
+            H->>R: render (based on js_renderer config)
+            R-->>H: rendered content
+            H-->>F: fallback content
         end
-        S->>S: apply max_chars truncation
+        F->>F: apply max_chars truncation
     end
 
-    S-->>LLM: formatted content + prompt
+    F-->>S: structured FetchResponse
+    S-->>LLM: formatted content
 ```
 
 ## Provider Routing Strategy
@@ -235,7 +271,13 @@ pivot-web-search/                      # marketplace + dev repo root
 │   ├── pivot_web_search_mcp/
 │   │   ├── __init__.py
 │   │   ├── __main__.py                # Entry: mcp.run(transport="stdio")
-│   │   ├── server.py                  # FastMCP server, 3 tools, smart defaults
+│   │   ├── server.py                  # FastMCP adapter, 3 Plugin tools
+│   │   ├── search_service.py          # Authoritative structured search orchestration
+│   │   ├── fetch_service.py           # Authoritative extraction and fallback orchestration
+│   │   ├── config_service.py          # Status and reload operations
+│   │   ├── presentation.py            # Markdown and JSON projections
+│   │   ├── cli.py                     # Human-facing CLI
+│   │   ├── machine_bridge.py          # Host-neutral one-shot JSON protocol
 │   │   ├── backends.py                # HTTP adapters: DDG/Tavily/Brave/Gemini
 │   │   ├── extraction.py              # trafilatura wrapper
 │   │   ├── http_client.py             # Shared httpx client + proxy failover
@@ -255,7 +297,8 @@ pivot-web-search/                      # marketplace + dev repo root
 │   │   ├── logging.py                 # Centralized logging (stderr + optional file)
 │   │   └── quota.py                   # Per-provider quota tracking, filelock (cross-platform)
 │   └── skills/pivot-web-search/       # Skill definition for Claude Code
-├── tests/                             # 313 tests (306 offline + 7 integration), 15 modules
+├── integrations/deepseek-harness/     # Installable external DSH Profile Bundle
+├── tests/                             # 362 tests (355 offline + 7 integration)
 ├── pyproject.toml                     # uv workspace shell — dev deps + lint/test config
 ├── ARCHITECTURE.md                    # This file
 └── docs/                              # Design documents (not tracked in git)

@@ -6,7 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Integration and interfaces
+- Installable `pivot-web-search-dsh` Profile Bundle under `integrations/deepseek-harness/`. It uses DSH's public plugin APIs to provide native `web_search` and `web_fetch` without modifying a DSH checkout.
+- Host-neutral `pivot-web-search-bridge` command for structured search/fetch adapters.
+- Human-facing `pivot-web-search` console command with `search`, `fetch`, and `config` subcommands.
+- Shared structured search, fetch, and configuration services used by MCP, CLI, and the machine bridge.
+
 ### Changed
+- Clarified that the repository product boundary is the Claude Code Plugin; external host integrations are optional out-of-tree adapters.
+- CLI search/fetch/config behavior now follows the same application services as the Plugin's MCP tools.
 - **Repository layout migrated to subdirectory pattern.** Plugin payload now lives under `plugins/pivot-web-search/` (the `${CLAUDE_PLUGIN_ROOT}` at install time), keeping dev-only files (`tests/`, root `pyproject.toml`, docs, CI) at the repo root and out of users' plugin caches. Marketplace `source` updated to `./plugins/pivot-web-search`. Repo root is now a uv workspace; `uv sync` from root installs both runtime and dev deps. Aligns with the multi-plugin marketplace pattern used by trail-of-bits/skills-curated and others.
 
 ### Fixed

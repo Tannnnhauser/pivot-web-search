@@ -5,10 +5,12 @@ from unittest.mock import AsyncMock, patch
 from pivot_web_search_mcp import server
 from pivot_web_search_mcp.providers import SearchProvider, SearchResult
 from pivot_web_search_mcp.results import dedup_and_rank
+from pivot_web_search_mcp.routing import FailureInfo
 
 
 class FakeProvider(SearchProvider):
     """Test provider returning configurable results."""
+
     provider_type = "fake"
 
     def __init__(self, name, results=None, priority=10, enabled=True):
@@ -29,85 +31,85 @@ def _make_results(n):
 
 
 class TestSearchWithRegistry:
-    @patch.object(server._registry, 'get_ordered')
+    @patch.object(server._registry, "get_ordered")
     async def test_first_provider_sufficient(self, mock_ordered):
         mock_ordered.return_value = [FakeProvider("good", _make_results(5))]
-        sr = await server._search_with_registry("test", 5)
+        sr = await server._service._search_normal("test", 5, "auto")
         assert isinstance(sr, SearchResult)
         assert len(sr.results) == 5
         assert sr.provider == "good"
 
-    @patch.object(server._registry, 'get_ordered')
+    @patch.object(server._registry, "get_ordered")
     async def test_falls_through_on_low_quality(self, mock_ordered):
         mock_ordered.return_value = [
             FakeProvider("poor", _make_results(1), priority=10),
             FakeProvider("good", _make_results(5), priority=20),
         ]
-        sr = await server._search_with_registry("test", 5)
+        sr = await server._service._search_normal("test", 5, "auto")
         assert isinstance(sr, SearchResult)
         assert sr.provider == "good"
         assert len(sr.results) == 5
 
-    @patch.object(server._registry, 'get_ordered')
+    @patch.object(server._registry, "get_ordered")
     async def test_keeps_best_when_all_low(self, mock_ordered):
         mock_ordered.return_value = [
             FakeProvider("one", _make_results(1), priority=10),
             FakeProvider("zero", [], priority=20),
         ]
-        sr = await server._search_with_registry("test", 5)
+        sr = await server._service._search_normal("test", 5, "auto")
         assert isinstance(sr, SearchResult)
         assert len(sr.results) == 1
 
-    @patch.object(server._registry, 'get_ordered')
+    @patch.object(server._registry, "get_ordered")
     async def test_all_fail_returns_failure_info(self, mock_ordered):
         mock_ordered.return_value = [
             FakeProvider("fail1", None, priority=10),
             FakeProvider("fail2", None, priority=20),
         ]
-        sr = await server._search_with_registry("test", 5)
-        assert isinstance(sr, server.FailureInfo)
+        sr = await server._service._search_normal("test", 5, "auto")
+        assert isinstance(sr, FailureInfo)
         assert len(sr.failures) == 2
         assert sr.failures[0]["provider"] == "fail1"
         assert sr.failures[1]["provider"] == "fail2"
 
-    @patch.object(server._registry, 'get_by_name')
+    @patch.object(server._registry, "get_by_name")
     async def test_specific_provider(self, mock_get):
         provider = FakeProvider("tavily", _make_results(3))
         mock_get.return_value = provider
-        sr = await server._search_with_registry("test", 5, provider_name="tavily")
+        sr = await server._service._search_normal("test", 5, "tavily")
         assert isinstance(sr, SearchResult)
         assert sr.provider == "tavily"
 
-    @patch.object(server._registry, 'get_by_name')
+    @patch.object(server._registry, "get_by_name")
     async def test_specific_provider_not_found(self, mock_get):
         mock_get.return_value = None
-        sr = await server._search_with_registry("test", 5, provider_name="nonexistent")
-        assert isinstance(sr, server.FailureInfo)
+        sr = await server._service._search_normal("test", 5, "nonexistent")
+        assert isinstance(sr, FailureInfo)
         assert "unknown provider" in sr.failures[0]["error"]
 
-    @patch.object(server._registry, 'get_by_name')
+    @patch.object(server._registry, "get_by_name")
     async def test_explicit_provider_disabled(self, mock_get):
         provider = FakeProvider("tavily", _make_results(3), enabled=False)
         mock_get.return_value = provider
-        sr = await server._search_with_registry("test", 5, provider_name="tavily")
-        assert isinstance(sr, server.FailureInfo)
+        sr = await server._service._search_normal("test", 5, "tavily")
+        assert isinstance(sr, FailureInfo)
         assert "disabled" in sr.failures[0]["error"]
 
-    @patch.object(server._registry, 'get_by_name')
+    @patch.object(server._registry, "get_by_name")
     async def test_explicit_provider_health_check_fails(self, mock_get):
         provider = FakeProvider("tavily", _make_results(3))
         provider.health_check = AsyncMock(return_value=(False, "no API key"))  # type: ignore[method-assign]
         mock_get.return_value = provider
-        sr = await server._search_with_registry("test", 5, provider_name="tavily")
-        assert isinstance(sr, server.FailureInfo)
+        sr = await server._service._search_normal("test", 5, "tavily")
+        assert isinstance(sr, FailureInfo)
         assert "no API key" in sr.failures[0]["error"]
 
-    @patch.object(server._registry, 'get_ordered')
+    @patch.object(server._registry, "get_ordered")
     async def test_min_acceptable_for_small_max(self, mock_ordered):
         mock_ordered.return_value = [
             FakeProvider("one", _make_results(1), priority=10),
         ]
-        sr = await server._search_with_registry("test", 1)
+        sr = await server._service._search_normal("test", 1, "auto")
         assert isinstance(sr, SearchResult)
         assert len(sr.results) == 1
 
