@@ -116,6 +116,22 @@ class TestWebFetch:
         assert "2/2" in result
 
     @patch.object(server._fetch_service, "fetch", new_callable=AsyncMock)
+    async def test_batch_mode_omits_invalid_urls_from_output_and_denominator(self, mock_fetch):
+        mock_fetch.return_value = FetchResponse(
+            [
+                FetchItem(url="https://a.com", content="Content A"),
+                FetchItem(url="not-a-url", error="unsupported URL", invalid=True),
+                FetchItem(url="https://b.com", content="Content B"),
+            ]
+        )
+        result = await server.WebFetch(["https://a.com", "not-a-url", "https://b.com"], "extract")
+        assert "Content A" in result
+        assert "Content B" in result
+        # Validation-failed URL is omitted entirely and excluded from the denominator.
+        assert "not-a-url" not in result
+        assert "2/2" in result
+
+    @patch.object(server._fetch_service, "fetch", new_callable=AsyncMock)
     async def test_max_chars_truncation(self, mock_fetch):
         mock_fetch.return_value = FetchResponse(
             [FetchItem(url="https://example.com", content="x" * 100, truncated=True)]

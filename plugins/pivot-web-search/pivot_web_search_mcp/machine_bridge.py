@@ -135,7 +135,7 @@ def _fetch_success(response: FetchResponse) -> dict:
         "protocolVersion": PROTOCOL_VERSION,
         "ok": True,
         "result": {
-            "url": item.url,
+            "url": item.final_url or item.url,
             "statusCode": status_code,
             "body": {"kind": "text", "content": content},
             "truncated": item.truncated,

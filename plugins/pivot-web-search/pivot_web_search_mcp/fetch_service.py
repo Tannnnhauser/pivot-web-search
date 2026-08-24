@@ -21,13 +21,22 @@ class FetchRequest:
 
 @dataclass(frozen=True)
 class FetchItem:
-    """Extracted content or a sanitized failure for one requested URL."""
+    """Extracted content or a sanitized failure for one requested URL.
+
+    ``url`` is the requested (validated) URL — presentation surfaces (MCP/CLI)
+    report it for backward compatibility. ``final_url`` carries the post-redirect
+    URL when it differs; the machine bridge reports it per MACHINE_PROTOCOL.md.
+    ``invalid`` marks a URL that failed request-time validation (never fetched);
+    batch presentation omits these, matching the pre-refactor output contract.
+    """
 
     url: str
     content: str | None = None
     error: str | None = None
     truncated: bool = False
     status_code: int | None = None
+    final_url: str | None = None
+    invalid: bool = False
 
 
 @dataclass(frozen=True)
@@ -84,7 +93,7 @@ class FetchService:
         items: list[FetchItem] = []
         for url, validation_error in normalized:
             if validation_error is not None:
-                items.append(FetchItem(url=url, error=validation_error))
+                items.append(FetchItem(url=url, error=validation_error, invalid=True))
                 continue
 
             extracted_item = extracted.get(url, {})
@@ -98,9 +107,10 @@ class FetchService:
             if not content:
                 items.append(
                     FetchItem(
-                        url=failed_item.get("final_url") or url,
+                        url=url,
                         error=failed_item.get("error", "extraction returned empty"),
                         status_code=failed_item.get("status_code"),
+                        final_url=failed_item.get("final_url"),
                     )
                 )
                 continue
@@ -110,10 +120,11 @@ class FetchService:
                 content = content[:truncation_limit]
             items.append(
                 FetchItem(
-                    url=extracted_item.get("final_url") or url,
+                    url=url,
                     content=content,
                     truncated=truncated,
                     status_code=extracted_item.get("status_code") or 200,
+                    final_url=extracted_item.get("final_url"),
                 )
             )
 

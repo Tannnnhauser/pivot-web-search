@@ -54,12 +54,16 @@ def format_fetch_markdown(response: FetchResponse) -> str:
         suffix = "\n\n[Content truncated due to length...]" if item.truncated else ""
         return f"Source: {item.url}\n\n---\n\n{item.content}{suffix}"
 
+    # Batch mode: URLs that failed request-time validation are omitted entirely
+    # (and excluded from the denominator), matching the pre-refactor contract.
+    fetched = [item for item in response.items if not item.invalid]
     parts = []
-    for item in response.items:
+    for item in fetched:
         if item.error is not None:
             parts.append(f"## {item.url}\n\n[Error: {item.error}]")
         else:
             suffix = "\n\n[Content truncated due to length...]" if item.truncated else ""
             parts.append(f"## {item.url}\n\n{item.content}{suffix}")
-    header = f"URLs extracted: {response.extracted_count}/{len(response.items)}"
+    extracted = sum(item.content is not None for item in fetched)
+    header = f"URLs extracted: {extracted}/{len(fetched)}"
     return f"{header}\n\n---\n\n" + "\n\n---\n\n".join(parts)
