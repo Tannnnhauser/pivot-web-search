@@ -13,6 +13,7 @@ import threading
 import time
 
 from .logging import log
+from .validation import is_unexpanded_user_config
 
 # ---------------------------------------------------------------------------
 # Paths and YAML loader
@@ -71,6 +72,8 @@ def _load_proxies_from_env():
     """
     raw = os.environ.get("PIVOT_WEB_SEARCH_PROXIES", "").strip()
     if not raw:
+        raw = os.environ.get("PIVOT_USERCONFIG_PROXY_URLS", "").strip()
+    if not raw or is_unexpanded_user_config(raw):
         return None
     result = []
     for entry in raw.split(","):
@@ -145,8 +148,11 @@ def get_proxy_config_source():
     if USER_PROXIES_YAML.exists():
         return {"source": "yaml", "path": str(USER_PROXIES_YAML)}
     raw = os.environ.get("PIVOT_WEB_SEARCH_PROXIES", "").strip()
-    if raw:
+    if raw and not is_unexpanded_user_config(raw):
         return {"source": "env", "env_var": "PIVOT_WEB_SEARCH_PROXIES", "value": raw}
+    raw = os.environ.get("PIVOT_USERCONFIG_PROXY_URLS", "").strip()
+    if raw and not is_unexpanded_user_config(raw):
+        return {"source": "user_config", "env_var": "PIVOT_USERCONFIG_PROXY_URLS", "value": raw}
     return {"source": "default"}
 
 

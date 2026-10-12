@@ -1,0 +1,34 @@
+{
+  "name": "pivot-web-search",
+  "version": "1.2.0",
+  "description": "Resilient multi-provider web search and content extraction for coding agents.",
+  "author": {
+    "name": "Tannnnhauser",
+    "url": "https://github.com/Tannnnhauser"
+  },
+  "homepage": "https://github.com/Tannnnhauser/pivot-web-search#readme",
+  "repository": "https://github.com/Tannnnhauser/pivot-web-search",
+  "license": "Apache-2.0",
+  "keywords": ["search", "web", "fetch", "extract", "mcp"],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Pivot Web Search",
+    "shortDescription": "Resilient web search",
+    "longDescription": "Search the public web through multiple providers with automatic failover, extract page content, and inspect provider health from one local MCP server.",
+    "developerName": "Tannnnhauser",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Search the public web",
+      "Extract page content",
+      "Inspect provider health"
+    ],
+    "websiteURL": "https://github.com/Tannnnhauser/pivot-web-search",
+    "defaultPrompt": [
+      "Search the web for current information about this topic.",
+      "Fetch and summarize the content at this URL.",
+      "Show the current Pivot Web Search provider status."
+    ]
+  }
+}

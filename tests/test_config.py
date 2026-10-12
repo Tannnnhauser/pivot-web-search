@@ -85,6 +85,18 @@ class TestLoadProxies:
         config._proxies_list = None
         config._proxies_mtime = 0
 
+    def test_userconfig_fallback(self, monkeypatch):
+        monkeypatch.delenv("PIVOT_WEB_SEARCH_PROXIES", raising=False)
+        monkeypatch.setenv("PIVOT_USERCONFIG_PROXY_URLS", "http://ui-proxy:8080")
+        result = config.load_proxies(config_path="/nonexistent.yaml")
+        assert result == ["http://ui-proxy:8080", None]
+
+    def test_standard_env_wins_over_userconfig(self, monkeypatch):
+        monkeypatch.setenv("PIVOT_WEB_SEARCH_PROXIES", "http://env-proxy:8080")
+        monkeypatch.setenv("PIVOT_USERCONFIG_PROXY_URLS", "http://ui-proxy:8080")
+        result = config.load_proxies(config_path="/nonexistent.yaml")
+        assert result == ["http://env-proxy:8080", None]
+
     def test_env_appends_direct(self, monkeypatch):
         monkeypatch.setenv("PIVOT_WEB_SEARCH_PROXIES", "http://myproxy:8080")
         result = config.load_proxies(config_path="/nonexistent.yaml")

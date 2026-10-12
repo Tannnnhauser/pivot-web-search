@@ -1,0 +1,20 @@
+{
+  "name": "pivot-web-search-plugin",
+  "interface": {
+    "displayName": "Pivot Web Search"
+  },
+  "plugins": [
+    {
+      "name": "pivot-web-search",
+      "source": {
+        "source": "local",
+        "path": "./plugins/pivot-web-search"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

@@ -23,6 +23,7 @@ DuckDuckGo works with no API key; adding an API-backed provider (Tavily, Brave, 
 | You use… | Start here |
 |---|---|
 | **Claude Code** | [Install the plugin](#claude-code-plugin) |
+| **Codex** | [Install the plugin](#codex-plugin) |
 | **Another MCP host** (Cursor, Claude Desktop, …) | [Configure `pivot-web-search-mcp`](#mcp-hosts) |
 | **Terminal / scripts / CI** | [Install and run the CLI](#cli) |
 | **DeepSeek Harness** | [Install runtime + DSH bundle](#deepseek-harness) |
@@ -83,6 +84,23 @@ For each provider key the plugin reads (1) the standard env var (e.g. `TAVILY_AP
 
 **macOS:** when Claude Code launches from Spotlight or the Dock it does **not** see `~/.zshrc` exports. Start it from a terminal, set keys via the `/plugin` UI, or add them to the `env` block in `~/.claude/config.json`.
 </details>
+
+### Codex plugin
+
+Add the same GitHub marketplace and install the same plugin payload:
+
+```sh
+codex plugin marketplace add Tannnnhauser/pivot-web-search --ref main
+codex plugin add pivot-web-search@pivot-web-search-plugin
+```
+
+Start a new Codex chat after installation. Refresh future releases with:
+
+```sh
+codex plugin marketplace upgrade pivot-web-search-plugin
+```
+
+Codex reads provider keys from the standard environment variables listed above. DDG remains available without a key; advanced provider and proxy configuration under `~/.pivot-web-search/` is shared with every host.
 
 ### MCP hosts
 
