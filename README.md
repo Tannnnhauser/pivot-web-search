@@ -437,11 +437,12 @@ The Claude Code plugin payload lives under `plugins/pivot-web-search/`; the DSH 
 
 ```sh
 uv sync                                # install workspace + dev deps
-uv run pytest -m "not integration" -q  # 358 offline tests
+uv run pytest -m "not integration" -q  # 364 offline tests
 uv run pytest -m integration -vv       # 7 live network/API tests
-uv run pytest                          # all 365 Python tests
+uv run pytest                          # all 371 Python tests
 npm --prefix integrations/deepseek-harness test
-npm --prefix integrations/deepseek-harness pack --dry-run
+(cd integrations/deepseek-harness && npm pack --dry-run)
+npm --prefix integrations/deepseek-harness run test:dsh
 ```
 
 For local Claude Code development: `claude --plugin-dir /path/to/pivot-web-search/`.

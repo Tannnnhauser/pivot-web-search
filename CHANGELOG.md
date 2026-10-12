@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Integration and interfaces
 - Installable `pivot-web-search-dsh` Profile Bundle under `integrations/deepseek-harness/`. It uses DSH's public plugin APIs to provide native `web_search` and `web_fetch` without modifying a DSH checkout.
+- Added CI coverage for the DSH adapter, npm payload, and a real temporary profile boot against the published compatibility target.
 - Host-neutral `pivot-web-search-bridge` command for structured search/fetch adapters.
 - Human-facing `pivot-web-search` console command with `search`, `fetch`, and `config` subcommands.
 - Shared structured search, fetch, and configuration services used by MCP, CLI, and the machine bridge.
