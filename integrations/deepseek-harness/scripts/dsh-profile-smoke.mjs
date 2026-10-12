@@ -2,28 +2,33 @@
 
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const integrationRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const repositoryRoot = resolve(integrationRoot, '../..')
+const searchProbeRoot = resolve(integrationRoot, 'test/fixtures/search-probe')
 const dshPackage = process.env.PIVOT_DSH_PACKAGE ?? '@deepseek-ai/dsh@0.2.1-alpha.2'
 const startupTimeoutMs = Number(process.env.PIVOT_DSH_STARTUP_TIMEOUT_MS ?? 90_000)
+const searchQuery = 'Python programming language official website'
 
 assert(Number.isSafeInteger(startupTimeoutMs) && startupTimeoutMs > 0, 'startup timeout must be a positive integer')
 
 const dshHome = await mkdtemp(join(tmpdir(), 'pivot-dsh-profile-'))
+const searchResultPath = join(dshHome, 'search-result.json')
 const environment = {
   ...process.env,
   DSH_HOME: dshHome,
   DSH_TELEMETRY_DISABLED: '1',
+  PIVOT_DSH_PROBE_OUTPUT: searchResultPath,
+  PIVOT_DSH_PROBE_QUERY: searchQuery,
 }
 
 try {
   await verifyBridge()
-  await runDsh(['plugin', '--profile', 'web', 'add', integrationRoot])
+  await runDsh(['plugin', '--profile', 'web', 'add', integrationRoot, searchProbeRoot])
   const config = await runDsh(['--profile', 'web', '--dump-config'])
 
   assert.match(config.stdout, /searchProvider: pivot/)
@@ -34,7 +39,11 @@ try {
   assert.match(config.stdout, /command: pivot-web-search-bridge/)
 
   await bootWebProfile()
-  process.stdout.write(`DSH profile smoke passed with ${dshPackage}\n`)
+  const searchResult = JSON.parse(await readFile(searchResultPath, 'utf8'))
+  assert(Array.isArray(searchResult.sources) && searchResult.sources.length > 0)
+  assert(searchResult.sources.every(source => /^https?:\/\//.test(source.url)))
+  process.stdout.write(`DSH search smoke passed with ${dshPackage}: ${JSON.stringify(searchQuery)}\n`)
+  for (const source of searchResult.sources) process.stdout.write(`- ${source.url}\n`)
 } finally {
   await rm(dshHome, { recursive: true, force: true })
 }

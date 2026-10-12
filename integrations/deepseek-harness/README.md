@@ -62,8 +62,8 @@ npm pack --dry-run
 
 For a real profile smoke test, install the Pivot bridge and run the published
 DSH compatibility target. The test installs this Bundle into a temporary `web`
-profile, verifies the composed providers, starts the profile, and removes the
-temporary profile afterward.
+profile, verifies the composed providers, performs a real search through DSH and
+the Pivot bridge, starts the profile, and removes the temporary profile afterward.
 
 ```sh
 uv tool install --force ../../plugins/pivot-web-search
