@@ -122,28 +122,46 @@ function bootWebProfile() {
     })
     let output = ''
     let ready = false
+    let probeComplete = false
+    let checkingProbe = false
     const timeout = setTimeout(() => {
+      clearInterval(probePoll)
       stopChild(child, detached)
       rejectPromise(new Error(`DSH web profile did not start within ${startupTimeoutMs}ms: ${output}`))
     }, startupTimeoutMs)
+    const probePoll = setInterval(async () => {
+      if (!ready || probeComplete || checkingProbe) return
+      checkingProbe = true
+      try {
+        JSON.parse(await readFile(searchResultPath, 'utf8'))
+        probeComplete = true
+        clearTimeout(timeout)
+        clearInterval(probePoll)
+        stopChild(child, detached)
+      } catch {
+        // The probe may not have created or finished writing the result yet.
+      } finally {
+        checkingProbe = false
+      }
+    }, 100)
 
     const onData = chunk => {
       output = appendOutput(output, chunk)
       if (!ready && /dsh web: http:\/\/127\.0\.0\.1:\d+\//.test(output)) {
         ready = true
-        clearTimeout(timeout)
-        stopChild(child, detached)
       }
     }
     child.stdout.on('data', onData)
     child.stderr.on('data', onData)
     child.once('error', error => {
       clearTimeout(timeout)
+      clearInterval(probePoll)
       rejectPromise(error)
     })
     child.once('close', code => {
       clearTimeout(timeout)
-      if (ready) resolvePromise()
+      clearInterval(probePoll)
+      if (ready && probeComplete) resolvePromise()
       else rejectPromise(new Error(`DSH web profile exited before startup (${String(code)}): ${output}`))
     })
   })

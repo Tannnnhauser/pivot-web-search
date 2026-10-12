@@ -440,6 +440,7 @@ uv sync                                # install workspace + dev deps
 uv run pytest -m "not integration" -q  # 364 offline tests
 uv run pytest -m integration -vv       # 7 live network/API tests
 uv run pytest                          # all 371 Python tests
+uv run python scripts/codex-plugin-smoke.py  # Codex install, skill discovery, cached MCP handshake
 npm --prefix integrations/deepseek-harness test
 (cd integrations/deepseek-harness && npm pack --dry-run)
 npm --prefix integrations/deepseek-harness run test:dsh

@@ -51,7 +51,11 @@ dsh plugin --profile web remove pivot-web-search-dsh
 This changes only the profile dependency and Bundle list, never the DSH source
 tree.
 
-## Verify
+## Verify from a source checkout
+
+The verification scripts and fixtures are development-only files in the Pivot
+repository; they are intentionally not included in the published npm tarball.
+Run these commands from `integrations/deepseek-harness/` in a source checkout.
 
 Run the adapter tests and inspect the npm payload:
 
@@ -67,6 +71,7 @@ the Pivot bridge, starts the profile, and removes the temporary profile afterwar
 
 ```sh
 uv tool install --force ../../plugins/pivot-web-search
+export PATH="$(uv tool dir --bin):$PATH"
 npm run test:dsh
 ```
 
