@@ -30,3 +30,68 @@ jobs:
 
       - name: Test
         run: uv run pytest -m "not integration"
+
+  codex:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CODEX_CLI_VERSION: "0.162.1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.19.0"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: |
+          npm install --global "@openai/codex@$CODEX_CLI_VERSION"
+          uv sync --locked
+
+      - name: Smoke-test Codex plugin install and MCP discovery
+        env:
+          PIVOT_CODEX_MARKETPLACE: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          PIVOT_CODEX_MARKETPLACE_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: uv run python scripts/codex-plugin-smoke.py
+
+  dsh:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.19.0"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "11.28.5"
+
+      - name: Install Pivot bridge
+        run: |
+          uv tool install --force --python 3.12 ./plugins/pivot-web-search
+          echo "$(uv tool dir --bin)" >> "$GITHUB_PATH"
+
+      - name: Test DSH adapter
+        run: npm --prefix integrations/deepseek-harness test
+
+      - name: Check DSH package
+        working-directory: integrations/deepseek-harness
+        run: npm pack --dry-run
+
+      - name: Smoke-test published DSH profile
+        run: npm --prefix integrations/deepseek-harness run test:dsh

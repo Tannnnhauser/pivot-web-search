@@ -1,0 +1,16 @@
+- id: pivot-web-search-provider
+  config:
+    command: pivot-web-search-bridge
+    mode: normal
+    env:
+      TAVILY_API_KEY: ''
+      BRAVE_API_KEY: ''
+      GEMINI_SEARCH_API_KEY: ''
+      GOOGLE_STUDIO_API_KEY: ''
+
+- insert:
+    - id: pivot-web-search-search-probe
+      name: pivot-web-search-dsh-search-probe
+      config:
+        outputPath: !!js process.env.PIVOT_DSH_PROBE_OUTPUT
+        query: !!js process.env.PIVOT_DSH_PROBE_QUERY

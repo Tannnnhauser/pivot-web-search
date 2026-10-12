@@ -6,8 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Codex plugin compatibility
+- Added Codex marketplace and plugin manifests that point to the same payload used by Claude Code.
+- Made the shared MCP launch host-neutral by resolving the installed plugin through `cwd` instead of a Claude-only path placeholder.
+- Ignore unexpanded Claude `userConfig` placeholders when another plugin host loads the shared MCP configuration.
+- Added CI coverage that installs from the GitHub commit through the real Codex CLI, checks fresh-session skill discovery, and handshakes with the MCP server from Codex's plugin cache.
+
 ### Integration and interfaces
 - Installable `pivot-web-search-dsh` Profile Bundle under `integrations/deepseek-harness/`. It uses DSH's public plugin APIs to provide native `web_search` and `web_fetch` without modifying a DSH checkout.
+- Added CI coverage for the DSH adapter, npm payload, and a real search through a temporary profile running the published compatibility target.
 - Host-neutral `pivot-web-search-bridge` command for structured search/fetch adapters.
 - Human-facing `pivot-web-search` console command with `search`, `fetch`, and `config` subcommands.
 - Shared structured search, fetch, and configuration services used by MCP, CLI, and the machine bridge.

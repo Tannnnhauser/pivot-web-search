@@ -2,6 +2,7 @@
 
 import ipaddress
 import os
+import re
 import socket
 import urllib.parse
 
@@ -18,6 +19,13 @@ BINARY_CONTENT_TYPES = {"image/", "audio/", "video/", "application/octet-stream"
 # Key loaders
 # ---------------------------------------------------------------------------
 
+_USER_CONFIG_PLACEHOLDER = re.compile(r"^\$\{user_config\.[a-z0-9_]+\}$")
+
+
+def is_unexpanded_user_config(value):
+    """Return whether a host passed through a Claude userConfig placeholder."""
+    return bool(_USER_CONFIG_PLACEHOLDER.fullmatch(value.strip()))
+
 
 def _load_env_key(name):
     """Read env var `name`, falling back to PIVOT_USERCONFIG_{name} (set by the
@@ -27,6 +35,8 @@ def _load_env_key(name):
     if val:
         return val
     val = os.environ.get(f"PIVOT_USERCONFIG_{name}", "").strip()
+    if is_unexpanded_user_config(val):
+        return None
     return val or None
 
 
