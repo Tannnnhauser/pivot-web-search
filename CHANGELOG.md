@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Dependency maintenance
+- Allow filelock 4.x and align the Claude Code plugin, Codex plugin, and Python package at 1.2.1 so plugin updates pick up the new dependency range.
+
 ### Codex plugin compatibility
 - Added Codex marketplace and plugin manifests that point to the same payload used by Claude Code.
 - Made the shared MCP launch host-neutral by resolving the installed plugin through `cwd` instead of a Claude-only path placeholder.

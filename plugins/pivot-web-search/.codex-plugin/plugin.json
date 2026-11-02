@@ -1,6 +1,6 @@
 {
   "name": "pivot-web-search",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Resilient multi-provider web search and content extraction for coding agents.",
   "author": {
     "name": "Tannnnhauser",
